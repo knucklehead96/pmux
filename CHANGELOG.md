@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `install.sh` one-line installer:
+  `curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | sh`.
+
 ## [0.1.0] - 2026-09-26
 
 First public release.
@@ -39,4 +46,5 @@ First public release.
 - `scripts/release.sh` builds stripped release binaries: dynamically linked
   and fully static (x86-64 Linux), plus `SHA256SUMS`.
 
+[Unreleased]: https://github.com/knucklehead96/pmux/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/knucklehead96/pmux/releases/tag/v0.1.0

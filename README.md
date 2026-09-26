@@ -20,6 +20,29 @@ A terminal process multiplexer. It keeps long-running processes alive in the bac
 
 ## Install
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | sh
+```
+
+The installer downloads the static binary of the latest release for your architecture, checks it against `SHA256SUMS` and installs it as `pmux` in `~/.local/bin` (`/usr/local/bin` when run as root). It works with `curl` or `wget`. Environment variables change what it does:
+
+| Variable | |
+|---|---|
+| `PMUX_VERSION` | The version to install, such as `0.1.0` or `v0.1.0`. The default is the latest release. |
+| `PMUX_INSTALL_DIR` | The directory to install to. |
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | PMUX_VERSION=0.1.0 PMUX_INSTALL_DIR="$HOME/bin" sh
+```
+
+If you prefer to read the script before running it:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh
+less install.sh
+sh install.sh
+```
+
 ### Prebuilt binaries
 
 Every [release](https://github.com/knucklehead96/pmux/releases) ships two x86-64 Linux binaries:
