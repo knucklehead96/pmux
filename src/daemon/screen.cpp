@@ -144,12 +144,12 @@ void put_color(SgrBuf& b, std::uint32_t packed, bool fg) {
   }
 }
 
-// Full SGR for a pen, starting from a reset.
-void append_sgr(std::string& out, const Screen::Pen& pen) {
+// Full SGR for a pen, starting from a reset. For libvterm (`vterm`), faint is font 1 (SGR 11).
+void append_sgr(std::string& out, const Screen::Pen& pen, bool vterm = false) {
   SgrBuf b;
   b.put("\x1b[0");
   if (pen.flags & kBold) b.put(";1");
-  if (pen.flags & kFaint) b.put(";2");
+  if (pen.flags & kFaint) b.put(vterm ? ";11" : ";2");
   if (pen.flags & kItalic) b.put(";3");
   if (pen.underline == 1) {
     b.put(";4");
@@ -205,7 +205,7 @@ Screen::Line line_from_cells(const VTermScreenCell* cells, int cols) {
 }
 
 // Appends the line's text with SGR, ending with SGR 0.
-void render_line(std::string& out, const Screen::Line& line) {
+void render_line(std::string& out, const Screen::Line& line, bool vterm = false) {
   std::size_t run = 0;
   std::size_t comb = 0;
   const Screen::Pen* cur = nullptr;
@@ -219,7 +219,7 @@ void render_line(std::string& out, const Screen::Line& line) {
       if (reset && plain(pen)) {
         // already in effect
       } else {
-        append_sgr(out, pen);
+        append_sgr(out, pen, vterm);
         reset = plain(pen);
       }
       cur = &pen;
@@ -230,6 +230,20 @@ void render_line(std::string& out, const Screen::Line& line) {
       for (char32_t extra : line.combining[comb].second) append_utf8(out, extra);
   }
   out += "\x1b[0m";
+}
+
+// The line cut to `cols` cells (a wide character whose right half is cut becomes a blank).
+Screen::Line truncated(const Screen::Line& line, int cols) {
+  const auto n = std::size_t(cols);
+  if (line.chars.size() <= n) return line;
+  Screen::Line out;
+  out.chars.assign(line.chars.begin(), line.chars.begin() + std::ptrdiff_t(n));
+  if (n > 0 && line.chars[n] == kWideCont) out.chars[n - 1] = 0;
+  for (const auto& run : line.runs)
+    if (run.first < n) out.runs.push_back(run);
+  for (const auto& comb : line.combining)
+    if (comb.first < n && out.chars[comb.first] != 0) out.combining.push_back(comb);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +308,7 @@ void ModeTracker::reset() {
   mouse_ = 0;
   mouse_1005_ = mouse_1006_ = mouse_1015_ = false;
   cursor_shape_ = -1;
+  modify_other_keys_ = 0;
   kitty_main_.assign(1, 0);
   kitty_alt_.assign(1, 0);
   title_.reset();
@@ -326,6 +341,7 @@ std::size_t ModeTracker::feed(const char* data, std::size_t len) {
         } else if (u >= 0x30 && u <= 0x7E) {
           state_ = State::Ground;
           dispatch_esc(ch);
+          if (cursor_restore_) return i + 1;
         } else if (ch == '\x18' || ch == '\x1a') {
           state_ = State::Ground;
         }
@@ -351,7 +367,7 @@ std::size_t ModeTracker::feed(const char* data, std::size_t len) {
         } else if (u >= 0x40 && u <= 0x7E) {
           state_ = State::Ground;
           dispatch_csi(ch);
-          if (alt_requested_) return i + 1;
+          if (alt_requested_ || alt_exit_ || cursor_restore_) return i + 1;
         }
         break;
       case State::Osc:
@@ -396,6 +412,7 @@ std::size_t ModeTracker::feed(const char* data, std::size_t len) {
 void ModeTracker::dispatch_esc(char final) {
   switch (final) {
     case 'c': reset(); break;
+    case '8': cursor_restore_ = true; break;
     case '=': keypad_ = true; break;
     case '>': keypad_ = false; break;
     default: break;
@@ -440,7 +457,12 @@ void ModeTracker::set_private_mode(int mode, bool on) {
     case 1047:
     case 1049:
       if (on) alt_requested_ = true;
+      else alt_exit_ = std::max(alt_exit_, mode == 1049 ? 2 : 1);
+      if (!on && mode == 1049) cursor_restore_ = true;
       alt_ = on;
+      break;
+    case 1048:
+      if (!on) cursor_restore_ = true;
       break;
     case 1000:
     case 1002:
@@ -467,6 +489,9 @@ void ModeTracker::dispatch_csi(char final) {
     keypad_ = false;
     cursor_visible_ = true;
     autowrap_ = true;
+  } else if ((final == 'm' || final == 'n') && prefix_ == '>' && intermediates_.empty()) {
+    // xterm modifyOtherKeys: CSI > 4 ; n m sets it, CSI > 4 m resets it, CSI > 4 n disables it.
+    if (param(p, 0, -1) == 4) modify_other_keys_ = final == 'm' ? int(std::clamp(param(p, 1, 0), 0L, 3L)) : 0;
   } else if (final == 'u' && intermediates_.empty()) {
     auto& stack = kitty_stack();
     if (prefix_ == '>') {
@@ -567,6 +592,11 @@ std::string ModeTracker::restore_input_modes() const {
   if (mouse_1015_) out += "\x1b[?1015h";
   if (focus_) out += "\x1b[?1004h";
   if (paste_) out += "\x1b[?2004h";
+  if (modify_other_keys_) {
+    out += "\x1b[>4;";
+    append_int(out, modify_other_keys_);
+    out += 'm';
+  }
   return out;
 }
 
@@ -736,6 +766,9 @@ void SgrRewriter::feed(const char* data, std::size_t len, std::string& out) {
           rewritable_ = true;
         } else if ((c0(u) && ch != '\x1b' && ch != '\x18' && ch != '\x1a') || u == 0x7F) {
           out += ch;  // C0 executes (DEL is ignored) without leaving the escape sequence
+        } else if (ch == 'c') {
+          out += "\x1b[?1049l\x1b" "c";  // RIS; libvterm's would stay in the alternate screen
+          state_ = State::Ground;
         } else {
           out += '\x1b';
           if (ch == '\x1b') break;  // restarts; the new ESC is held
@@ -778,19 +811,25 @@ void SgrRewriter::feed(const char* data, std::size_t len, std::string& out) {
           raw_ += ch;
           rewritable_ = false;  // intermediates, DEL, non-ASCII
         }
-        if (state_ == State::Csi && params_.size() + c0_.size() > kMaxCsi) {
-          out += raw_;
-          state_ = State::CsiPass;
+        if (state_ == State::Csi && params_.size() + raw_.size() > kMaxCsi) {
+          // Runaway sequence: discarded (the C0 controls inside it still execute).
+          out += c0_;
+          raw_.clear();
+          params_.clear();
+          c0_.clear();
+          state_ = State::CsiDiscard;
         }
         break;
-      case State::CsiPass:
+      case State::CsiDiscard:
         if (ch == '\x1b') {
           state_ = State::Esc;
-        } else if (u >= 0x30 && u <= 0x3F && !keep_param_byte(ch)) {
-          // dropped: beyond libvterm's argument limit
-        } else {
+        } else if (ch == '\x18' || ch == '\x1a') {
           out += ch;
-          if ((u >= 0x40 && u <= 0x7E) || ch == '\x18' || ch == '\x1a') state_ = State::Ground;
+          state_ = State::Ground;
+        } else if (c0(u)) {
+          out += ch;
+        } else if (u >= 0x40 && u <= 0x7E) {
+          state_ = State::Ground;
         }
         break;
       case State::String:
@@ -810,6 +849,15 @@ void SgrRewriter::feed(const char* data, std::size_t len, std::string& out) {
           --i;
         }
         break;
+    }
+    if (state_ == State::Ground) {
+      in_sequence_ = false;
+      if (boundary_wanted_) {
+        boundary_ = out.size();
+        boundary_wanted_ = false;
+      }
+    } else if (state_ == State::String || state_ == State::EscIntermediate) {
+      in_sequence_ = true;
     }
   }
 }
@@ -862,7 +910,9 @@ static int cb_sb_popline(int cols, VTermScreenCell* cells, void* user) {
 }
 
 Screen::Screen(int rows, int cols, std::size_t scrollback_lines)
-    : rows_(std::max(rows, 1)), cols_(std::max(cols, 1)), capacity_(scrollback_lines) {
+    : rows_(std::clamp(rows, kMinRows, kMaxRows)),
+      cols_(std::clamp(cols, kMinCols, kMaxCols)),
+      capacity_(scrollback_lines) {
   vt_ = vterm_new(rows_, cols_);
   vterm_set_utf8(vt_, 1);
   vterm_output_set_callback(vt_, cb_output, this);
@@ -870,7 +920,9 @@ Screen::Screen(int rows, int cols, std::size_t scrollback_lines)
   state_ = vterm_obtain_state(vt_);
   vterm_screen_set_callbacks(screen_, &kCallbacks, this);
   vterm_screen_enable_altscreen(screen_, 1);
-  vterm_screen_enable_reflow(screen_, true);
+  // No reflow: libvterm 0.3.3's reflow aborts or corrupts memory when the cursor sits on a
+  // wrapped line longer than the screen.
+  vterm_screen_enable_reflow(screen_, false);
   vterm_screen_reset(screen_, 1);
 }
 
@@ -893,10 +945,20 @@ std::uint32_t Screen::default_bg() const {
 void Screen::feed(const char* raw, std::size_t raw_len) {
   rewritten_.clear();
   sgr_.feed(raw, raw_len, rewritten_);
-  const char* data = rewritten_.data();
-  std::size_t len = rewritten_.size();
+  if (const auto cut = sgr_.take_boundary()) {
+    // A resize happened while libvterm was inside a sequence: reset the region once it is out.
+    process(rewritten_.data(), *cut);
+    reset_scroll_region();
+    process(rewritten_.data() + *cut, rewritten_.size() - *cut);
+  } else {
+    process(rewritten_.data(), rewritten_.size());
+  }
+}
+
+void Screen::process(const char* data, std::size_t len) {
   while (len > 0) {
     const std::size_t n = modes_.feed(data, len);
+    const bool was_alt = alt_;
     if (modes_.take_alt_request()) {
       // data[n - 1] is the final byte of a sequence that switches to the alternate screen.
       // Save the primary screen first: libvterm cannot read it while the alternate is active.
@@ -905,10 +967,26 @@ void Screen::feed(const char* raw, std::size_t raw_len) {
         saved_primary_.clear();
         for (int r = 0; r < rows_; ++r) saved_primary_.push_back(read_row(r));
         vterm_state_get_cursorpos(state_, &saved_cursor_);
+        alt_resized_ = false;
       }
       vterm_input_write(vt_, data + n - 1, 1);
     } else {
       vterm_input_write(vt_, data, n);
+    }
+    // data[n - 1] ended a sequence that left the alternate screen: after a resize, libvterm's
+    // primary buffer is stale; replace it with the rows the snapshot showed.
+    if (const int exit = modes_.take_alt_exit(); exit && was_alt && !alt_) {
+      if (alt_resized_) repaint_primary(exit == 2);
+      alt_resized_ = false;
+    }
+    // libvterm does not clamp the saved cursor on resize: a restore can put its cursor off the
+    // screen, and the next character is written out of bounds. CSI ? 0 h (an unknown mode, a
+    // no-op) makes libvterm clamp the cursor like after every CSI.
+    if (modes_.take_cursor_restore()) {
+      VTermPos pos{};
+      vterm_state_get_cursorpos(state_, &pos);
+      if (pos.row < 0 || pos.row >= rows_ || pos.col < 0 || pos.col >= cols_)
+        vterm_input_write(vt_, "\x1b[?0h", 6);
     }
     data += n;
     len -= n;
@@ -916,20 +994,83 @@ void Screen::feed(const char* raw, std::size_t raw_len) {
 }
 
 void Screen::resize(int rows, int cols) {
-  if (rows <= 0 || cols <= 0 || (rows == rows_ && cols == cols_)) return;
+  if (rows <= 0 || cols <= 0) return;
+  rows = std::clamp(rows, kMinRows, kMaxRows);
+  cols = std::clamp(cols, kMinCols, kMaxCols);
+  if (rows == rows_ && cols == cols_) return;
+  if (alt_) {
+    alt_resizing_ = true;
+    vterm_set_size(vt_, rows, cols);
+    alt_resizing_ = false;
+    resize_saved_primary(rows);
+    alt_resized_ = true;
+  } else {
+    vterm_set_size(vt_, rows, cols);
+  }
   rows_ = rows;
   cols_ = cols;
-  vterm_set_size(vt_, rows, cols);
+  // libvterm does not clamp the scroll region's top on resize: a region starting below the new
+  // last row makes the next scroll write out of bounds. Reset it, as xterm and tmux do on resize;
+  // if libvterm is inside a string or escape sequence, as soon as it is out of it.
+  if (sgr_.at_boundary()) reset_scroll_region();
+  else sgr_.request_boundary();
+}
+
+void Screen::reset_scroll_region() {
+  VTermPos pos{};
+  vterm_state_get_cursorpos(state_, &pos);
+  std::string out = "\x1b[r";  // DECSTBM homes the cursor: put it back
+  append_cup(out, std::clamp(pos.row, 0, rows_ - 1), std::clamp(pos.col, 0, cols_ - 1));
+  vterm_input_write(vt_, out.data(), out.size());
+}
+
+void Screen::resize_saved_primary(int rows) {
+  auto& saved = saved_primary_;
+  const int old_rows = int(saved.size());
+  if (rows > old_rows) {
+    // Growing: pull lines back from history above the rows, then add blank rows below.
+    int pulled = 0;
+    while (old_rows + pulled < rows && !scrollback_.empty()) {
+      saved.insert(saved.begin(), std::move(scrollback_.back()));
+      scrollback_.pop_back();
+      ++pulled;
+    }
+    saved.resize(std::size_t(rows));
+    saved_cursor_.row += pulled;
+  } else if (rows < old_rows) {
+    // Shrinking: drop blank rows below the cursor, then push top rows into history.
+    while (int(saved.size()) > rows && int(saved.size()) - 1 > saved_cursor_.row && saved.back().chars.empty())
+      saved.pop_back();
+    const int excess = int(saved.size()) - rows;
+    for (int i = 0; i < excess; ++i) push_line(std::move(saved[std::size_t(i)]));
+    saved.erase(saved.begin(), saved.begin() + excess);
+    saved_cursor_.row = std::max(saved_cursor_.row - excess, 0);
+  }
+}
+
+void Screen::repaint_primary(bool restore_cursor) {
+  VTermPos cursor{};
+  vterm_state_get_cursorpos(state_, &cursor);
+  if (restore_cursor) cursor = saved_cursor_;
+  const Pen pen = current_pen();
+  std::string out = "\x1b[0m\x1b[H\x1b[2J";
+  for (int r = 0; r < rows_ && r < int(saved_primary_.size()); ++r) {
+    append_cup(out, r, 0);
+    render_line(out, truncated(saved_primary_[std::size_t(r)], cols_), true);
+  }
+  append_cup(out, std::clamp(cursor.row, 0, rows_ - 1), std::clamp(cursor.col, 0, cols_ - 1));
+  append_sgr(out, pen, true);
+  vterm_input_write(vt_, out.data(), out.size());
 }
 
 void Screen::push_line(Line line) {
-  if (capacity_ == 0) return;
+  if (capacity_ == 0 || alt_resizing_) return;
   while (scrollback_.size() >= capacity_) scrollback_.pop_front();
   scrollback_.push_back(std::move(line));
 }
 
 bool Screen::pop_line(Line& line) {
-  if (scrollback_.empty()) return false;
+  if (scrollback_.empty() || alt_resizing_) return false;
   line = std::move(scrollback_.back());
   scrollback_.pop_back();
   return true;
@@ -969,13 +1110,19 @@ std::string Screen::snapshot(bool interactive) {
     }
   } else {
     // The primary screen is not readable while the alternate screen is active: use the copy
-    // saved when the app switched, so the terminal's DECSC and primary screen match.
+    // saved when the app switched (adjusted by resizes since), so the terminal's DECSC and
+    // primary screen match.
     for (const Line& line : saved_primary_) {
       next_line();
-      render_line(out, line);
+      render_line(out, truncated(line, cols_));
     }
-    if (!saved_primary_.empty())
-      append_cup(out, std::clamp(saved_cursor_.row, 0, rows_ - 1), std::clamp(saved_cursor_.col, 0, cols_ - 1));
+    if (!saved_primary_.empty()) {
+      // The stream's last line is on row min(lines, rows_) - 1.
+      const auto saved = long(saved_primary_.size());
+      const long shown = std::min(long(scrollback_.size()) + saved, long(rows_));
+      const long row = saved_cursor_.row + shown - saved;
+      append_cup(out, int(std::clamp(row, 0L, long(rows_ - 1))), std::clamp(saved_cursor_.col, 0, cols_ - 1));
+    }
     if (interactive) out += modes_.restore_kitty(false);  // the main screen has its own kitty flags stack
     out += "\x1b[?1049h\x1b[H\x1b[2J";
   }
@@ -994,6 +1141,12 @@ std::string Screen::snapshot(bool interactive) {
   out += modes_.restore_title_and_colors();
 
   // The app's current pen.
+  const Pen pen = current_pen();
+  if (!plain(pen)) append_sgr(out, pen);
+  return out;
+}
+
+Screen::Pen Screen::current_pen() const {
   VTermScreenCell pen_cell{};
   VTermValue v;
   vterm_state_get_penattr(state_, VTERM_ATTR_BOLD, &v);
@@ -1016,9 +1169,7 @@ std::string Screen::snapshot(bool interactive) {
   pen_cell.fg = v.color;
   vterm_state_get_penattr(state_, VTERM_ATTR_BACKGROUND, &v);
   pen_cell.bg = v.color;
-  const Pen pen = pen_of(pen_cell);
-  if (!plain(pen)) append_sgr(out, pen);
-  return out;
+  return pen_of(pen_cell);
 }
 
 }  // namespace pmux

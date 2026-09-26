@@ -17,10 +17,15 @@ namespace pmux {
 // The escape-sequence parser state survives chunk boundaries.
 class ModeTracker {
  public:
-  // Returns the bytes consumed: stops right after a sequence that enters the alternate
-  // screen (see take_alt_request), else consumes everything.
+  // Returns the bytes consumed: stops right after a sequence that enters or leaves the
+  // alternate screen (see take_alt_request / take_alt_exit) or restores the saved cursor
+  // (take_cursor_restore), else consumes everything.
   std::size_t feed(const char* data, std::size_t len);
   bool take_alt_request() { return std::exchange(alt_requested_, false); }
+  // 0: no alternate screen exit; 1: left it (47 / 1047); 2: left it restoring the cursor (1049).
+  int take_alt_exit() { return std::exchange(alt_exit_, 0); }
+  // DECRC (ESC 8), CSI ? 1048 l or CSI ? 1049 l.
+  bool take_cursor_restore() { return std::exchange(cursor_restore_, false); }
   void reset();
 
   // Mode restore sequences (keys, mouse, paste, cursor shape, cursor visibility last).
@@ -50,6 +55,8 @@ class ModeTracker {
   std::string osc_;
   bool osc_overflow_ = false;
   bool alt_requested_ = false;
+  int alt_exit_ = 0;
+  bool cursor_restore_ = false;
 
   // Tracked state.
   bool alt_ = false;
@@ -62,6 +69,7 @@ class ModeTracker {
   int mouse_ = 0;  // 1000 / 1002 / 1003 (mutually exclusive), 0 = off
   bool mouse_1005_ = false, mouse_1006_ = false, mouse_1015_ = false;
   int cursor_shape_ = -1;  // DECSCUSR Ps; -1 = never set
+  int modify_other_keys_ = 0;  // xterm modifyOtherKeys (CSI > 4 ; n m), 0 = off
   std::vector<std::uint32_t> kitty_main_{0}, kitty_alt_{0};  // back() = current flags
   std::optional<std::string> title_;
   std::map<int, std::string> palette_;  // OSC 4 index -> spec
@@ -74,14 +82,20 @@ class ModeTracker {
 // the font already. Also drops underline colors (58, which libvterm misreads as further SGR
 // parameters) and the color-space id of `38:2:<cs>:r:g:b` / `48:...`, and keeps every CSI
 // within libvterm's 16-argument limit (more crash libvterm 0.3.3; long SGRs are split, other
-// sequences truncated). Other bytes pass through unchanged; parser state survives chunk
-// boundaries (a partial CSI is held back).
+// sequences truncated; a CSI longer than 4 KiB is discarded). Every RIS (ESC c) is preceded by
+// CSI ? 1049 l: libvterm's RIS does not leave the alternate screen. Other bytes pass through
+// unchanged; parser state survives chunk boundaries (a partial CSI is held back).
 class SgrRewriter {
  public:
   void feed(const char* data, std::size_t len, std::string& out);
+  // False while libvterm, fed everything output so far, is inside a string or escape sequence.
+  bool at_boundary() const { return !in_sequence_; }
+  // The next feed() records the offset in `out` where at_boundary() holds again.
+  void request_boundary() { boundary_wanted_ = true; }
+  std::optional<std::size_t> take_boundary() { return std::exchange(boundary_, std::nullopt); }
 
  private:
-  enum class State { Ground, Esc, EscIntermediate, Csi, CsiPass, String, StringEsc };
+  enum class State { Ground, Esc, EscIntermediate, Csi, CsiDiscard, String, StringEsc };
   void finish_csi(char final, std::string& out);
   // Counts argument separators; false for parameter bytes past libvterm's argument limit.
   bool keep_param_byte(char ch);
@@ -92,11 +106,19 @@ class SgrRewriter {
   std::string c0_;      // C0 controls executed inside it
   int separators_ = 0;  // ';' and ':' seen in it
   bool rewritable_ = true;
+  bool in_sequence_ = false;  // libvterm has seen part of a string or escape sequence
+  bool boundary_wanted_ = false;
+  std::optional<std::size_t> boundary_;
 };
 
 // Per-session virtual terminal: libvterm screen, scrollback ring, mode tracker.
 class Screen {
  public:
+  // libvterm's size is clamped to [kMinRows..kMaxRows] x [kMinCols..kMaxCols]: libvterm 0.3.3
+  // crashes on a double-width character in a 1-column screen.
+  static constexpr int kMinRows = 2, kMinCols = 2;
+  static constexpr int kMaxRows = 500, kMaxCols = 1000;
+
   Screen(int rows, int cols, std::size_t scrollback_lines = 10000);
   ~Screen();
   Screen(const Screen&) = delete;
@@ -127,6 +149,7 @@ class Screen {
     std::vector<std::pair<std::uint16_t, std::u32string>> combining;  // extra codepoints per column
   };
 
+  // libvterm's scrollback callbacks; ignored while resizing with the alternate screen active.
   void push_line(Line line);
   bool pop_line(Line& line);
   void clear_scrollback() { scrollback_.clear(); }
@@ -138,6 +161,11 @@ class Screen {
 
  private:
   Line read_row(int row) const;
+  Pen current_pen() const;
+  void process(const char* data, std::size_t len);
+  void reset_scroll_region();
+  void resize_saved_primary(int rows);
+  void repaint_primary(bool restore_cursor);
 
   VTerm* vt_ = nullptr;
   VTermScreen* screen_ = nullptr;
@@ -146,8 +174,14 @@ class Screen {
   int cols_;
   std::size_t capacity_;
   std::deque<Line> scrollback_;
-  std::vector<Line> saved_primary_;  // primary screen rows when the alternate screen was entered
+  // The primary screen while the alternate screen is active: its rows (always rows_ of them)
+  // and the cursor saved on entry. Resizes adjust them like a terminal would (history pulled in
+  // when growing; blank rows below the cursor, then top rows pushed to history when shrinking),
+  // instead of libvterm, whose primary buffer is repainted from them on exit if resized.
+  std::vector<Line> saved_primary_;
   VTermPos saved_cursor_{};
+  bool alt_resizing_ = false;  // inside vterm_set_size with the alternate screen active
+  bool alt_resized_ = false;   // resized since the alternate screen was entered
   ModeTracker modes_;
   SgrRewriter sgr_;
   std::string rewritten_;  // scratch for feed()

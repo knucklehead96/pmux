@@ -1,6 +1,7 @@
 #include "client/tui.hpp"
 
 #include <poll.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -916,6 +917,9 @@ void Tui::submit_dialog() {
   PayloadWriter w;
   w.str(name).str(dir).strs(argv).strs(env);
   w.u16(static_cast<std::uint16_t>(size.dimy)).u16(static_cast<std::uint16_t>(size.dimx));
+  const mode_t mask = umask(0);
+  umask(mask);
+  w.u32(mask);
   auto reply = ctl_request(make_frame(MsgType::New, w.take()));
   if (!reply || reply->type != MsgType::Ok) {
     dialog_error_ = reply_error(reply);

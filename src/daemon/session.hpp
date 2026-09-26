@@ -24,6 +24,7 @@ struct SessionSpec {
   int rows = 24;
   int cols = 80;
   std::size_t scrollback_lines = 10000;
+  int umask = -1;  // the creating client's umask; -1 = the daemon's
 };
 
 // One managed process: its PTY master and metadata.
@@ -43,13 +44,16 @@ class Session {
   int master_fd() const { return master_.get(); }
   // Path of the PTY slave (the process's controlling terminal), e.g. /dev/pts/3.
   const std::string& tty_path() const { return tty_path_; }
+  // Device number (st_rdev) of the PTY slave; 0 if unknown or the PTY is closed.
+  dev_t tty_rdev() const { return master_ ? tty_rdev_ : 0; }
   SystemClock::time_point created() const { return created_; }
   SteadyClock::time_point last_activity() const { return last_activity_; }
   std::optional<SystemClock::time_point> last_output() const { return last_output_; }
   bool bell() const { return bell_; }
   void clear_bell() { bell_ = false; }
   void set_name(std::string name) { name_ = std::move(name); }
-  // argv of the PTY's foreground process group leader, joined by spaces; empty if unknown.
+  // argv of the PTY's foreground process group leader, joined by spaces (at most 4 KiB of
+  // /proc/<pgid>/cmdline); empty if unknown. Cached for up to 500 ms.
   std::string fg_command() const;
 
   // Reads one chunk of PTY output into `out` and feeds it to the screen. While detached,
@@ -59,6 +63,7 @@ class Session {
   void queue_input(std::string_view data);
   void flush_input();
   bool has_pending_input() const { return !input_.empty(); }
+  std::size_t pending_input() const { return input_.size(); }
 
   void resize(int rows, int cols);
   void notify_winch();
@@ -83,6 +88,7 @@ class Session {
   std::string name_;
   std::string dir_;
   std::string tty_path_;
+  dev_t tty_rdev_ = 0;
   std::vector<std::string> argv_;
   SystemClock::time_point created_;
   SteadyClock::time_point last_activity_;
@@ -90,6 +96,9 @@ class Session {
   std::unique_ptr<Screen> screen_;
   bool bell_ = false;
   std::string input_;
+  mutable pid_t fg_pgrp_ = 0;
+  mutable SteadyClock::time_point fg_time_;
+  mutable std::string fg_command_;
   std::optional<int> reaped_;
   std::optional<int> exit_status_;
 };

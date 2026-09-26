@@ -4,15 +4,15 @@
 #include <pty.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <iterator>
 
 namespace pmux {
 
@@ -26,12 +26,17 @@ std::vector<char*> c_strings(const std::vector<std::string>& v) {
   return out;
 }
 
-// Runs in the forked child: undo daemon signal state, then exec. Reports errno on err_fd.
-[[noreturn]] void exec_child(const char* dir, char* const* argv, char** envp, int err_fd) {
+constexpr std::size_t kMaxCmdline = 4096;
+constexpr auto kFgCacheTime = std::chrono::milliseconds(500);
+
+// Runs in the forked child: reset every signal disposition and the signal mask (the daemon may
+// have inherited ignored signals), apply the client's umask, then exec. Reports errno on err_fd.
+[[noreturn]] void exec_child(const char* dir, char* const* argv, char** envp, int mask, int err_fd) {
+  for (int sig = 1; sig < NSIG; ++sig) signal(sig, SIG_DFL);
   sigset_t none;
   sigemptyset(&none);
   sigprocmask(SIG_SETMASK, &none, nullptr);
-  for (int sig : {SIGPIPE, SIGCHLD, SIGINT, SIGTERM, SIGHUP, SIGQUIT}) signal(sig, SIG_DFL);
+  if (mask >= 0) umask(mode_t(mask) & 0777);
 
   if (chdir(dir) == 0) {
     environ = envp;
@@ -61,15 +66,15 @@ std::unique_ptr<Session> Session::spawn(std::uint32_t id, const SessionSpec& spe
   UniqueFd err_write(pipe_fds[1]);
 
   winsize ws{};
-  ws.ws_row = static_cast<unsigned short>(spec.rows);
-  ws.ws_col = static_cast<unsigned short>(spec.cols);
+  ws.ws_row = static_cast<unsigned short>(std::min(spec.rows, Screen::kMaxRows));
+  ws.ws_col = static_cast<unsigned short>(std::min(spec.cols, Screen::kMaxCols));
   int master = -1;
   const pid_t pid = forkpty(&master, nullptr, nullptr, &ws);
   if (pid < 0) {
     error = std::string("forkpty: ") + std::strerror(errno);
     return nullptr;
   }
-  if (pid == 0) exec_child(spec.dir.c_str(), argv.data(), envp.data(), err_write.get());
+  if (pid == 0) exec_child(spec.dir.c_str(), argv.data(), envp.data(), spec.umask, err_write.get());
 
   UniqueFd master_fd(master);
   err_write.reset();
@@ -92,7 +97,11 @@ std::unique_ptr<Session> Session::spawn(std::uint32_t id, const SessionSpec& spe
   s->pid_ = pid;
   s->name_ = spec.name;
   s->dir_ = spec.dir;
-  if (const char* tty = ptsname(master)) s->tty_path_ = tty;
+  if (const char* tty = ptsname(master)) {
+    s->tty_path_ = tty;
+    struct stat st {};
+    if (stat(tty, &st) == 0 && S_ISCHR(st.st_mode)) s->tty_rdev_ = st.st_rdev;
+  }
   s->argv_ = spec.argv;
   s->created_ = SystemClock::now();
   s->last_activity_ = SteadyClock::now();
@@ -121,11 +130,28 @@ std::string Session::fg_command() const {
   if (!master_ || exited()) return {};
   const pid_t pgrp = tcgetpgrp(master_.get());
   if (pgrp <= 0) return {};
-  std::ifstream in("/proc/" + std::to_string(pgrp) + "/cmdline", std::ios::binary);
-  std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto now = SteadyClock::now();
+  if (pgrp == fg_pgrp_ && now - fg_time_ < kFgCacheTime) return fg_command_;
+
+  std::string raw;
+  const std::string path = "/proc/" + std::to_string(pgrp) + "/cmdline";
+  if (UniqueFd fd(open(path.c_str(), O_RDONLY | O_CLOEXEC)); fd) {
+    raw.resize(kMaxCmdline);
+    std::size_t len = 0;
+    while (len < raw.size()) {
+      const ssize_t n = read(fd.get(), raw.data() + len, raw.size() - len);
+      if (n < 0 && errno == EINTR) continue;
+      if (n <= 0) break;
+      len += std::size_t(n);
+    }
+    raw.resize(len);
+  }
   while (!raw.empty() && raw.back() == '\0') raw.pop_back();
   for (char& ch : raw)
     if (ch == '\0') ch = ' ';
+  fg_pgrp_ = pgrp;
+  fg_time_ = now;
+  fg_command_ = raw;
   return raw;
 }
 
@@ -151,6 +177,8 @@ void Session::flush_input() {
 
 void Session::resize(int rows, int cols) {
   if (!master_ || rows <= 0 || cols <= 0) return;
+  rows = std::min(rows, Screen::kMaxRows);
+  cols = std::min(cols, Screen::kMaxCols);
   winsize ws{};
   ws.ws_row = static_cast<unsigned short>(rows);
   ws.ws_col = static_cast<unsigned short>(cols);

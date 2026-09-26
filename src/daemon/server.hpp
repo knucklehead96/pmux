@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/types.h>
+
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -31,6 +33,8 @@ class Server {
     std::string out;
     std::size_t out_off = 0;
     std::uint32_t attached = 0;  // session id
+    dev_t tty_rdev = 0;          // device of the tty the client attached from (0 = unknown)
+    std::size_t snapshot_size = 0;  // the last snapshot sent; allowed on top of the queue limit
     bool want_write = false;
     bool dead = false;
     std::size_t pending() const { return out.size() - out_off; }
@@ -80,6 +84,8 @@ class Server {
 
   Client* find_client(std::uint32_t id);
   Proc* find_proc(std::uint32_t id);
+  Proc* find_proc_by_tty(dev_t rdev);
+  bool attach_loop(const Client& c, const Proc& target, dev_t tty);
   bool name_taken(std::string_view name) const;
   std::string default_name(const std::string& dir) const;
 

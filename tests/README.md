@@ -66,6 +66,18 @@ Files:
   during the startup theme query, self-attach refusal (CLI, TUI) and nested
   attach to another process, the too-small terminal screen, and (slow)
   Release build + install into a temp dir.
+- `test_regressions_client.py` — client / TUI review fixes: detach while
+  output floods a slow terminal, TUI exit when the daemon dies, socket
+  directory / owner checks, resizes during a TUI attach, inherited fds,
+  signals while attached (CLI, TUI), detach-key forms (kitty lock
+  modifiers, modifyOtherKeys, split sequences, look-alikes), Home/End
+  variants, the list screen's late cursor-shape reply, harness style
+  carry-over, specific connect errors.
+- `test_regressions_daemon.py` — daemon / screen review fixes: libvterm
+  crashes (reflow, wide characters on one column, huge sizes), the alternate
+  screen across resizes, RIS in the alternate screen, child signal state and
+  umask, attach loops, modifyOtherKeys restore, process name, `daemon.log`,
+  bounded queues and CSI buffer, foreground command.
 
 Notes: a detached tmux does not answer OSC 11, so pmux uses its assumed
 background (#1E1E1E dark / #FAFAF7 light) and the selection-bar color is

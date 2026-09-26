@@ -179,7 +179,9 @@ int cmd_new(const Options& o, const Config& config) {
   UniqueFd fd = connect_or_report();
   if (!fd) return 1;
   PayloadWriter w;
-  w.str(o.name).str(current_dir()).strs(argv).strs(current_env()).u16(rows).u16(cols);
+  const mode_t mask = umask(0);
+  umask(mask);
+  w.str(o.name).str(current_dir()).strs(argv).strs(current_env()).u16(rows).u16(cols).u32(mask);
   auto reply = request(fd.get(), make_frame(MsgType::New, w.take()));
   if (!reply || reply->type != MsgType::Ok) return report_failure(reply);
 

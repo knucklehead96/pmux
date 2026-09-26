@@ -13,12 +13,15 @@ namespace pmux {
 // Payloads (all integers little-endian; str = u32 length + bytes; strs = u32 count + str...):
 //   LIST        -                                  -> LIST_REPLY
 //   LIST_REPLY  u32 count, ProcInfo...
-//   NEW         str name, str dir, strs argv, strs env, u16 rows, u16 cols   -> OK(u32 id, str name) | ERROR
+//   NEW         str name, str dir, strs argv, strs env, u16 rows, u16 cols [, u32 umask]
+//                                                  -> OK(u32 id, str name) | ERROR
+//               (umask: the client's, applied to the process; optional for older clients)
 //   RENAME      u32 id, str name                   -> OK | ERROR
 //   KILL        u32 id  (exited: removes it)       -> OK once the process has exited | ERROR
 //   REMOVE      u32 id  (exited processes only)    -> OK | ERROR
 //   ATTACH      u32 id, u16 rows, u16 cols, str client tty path ("" if unknown)
 //                                                  -> OK, SNAPSHOT..., then OUTPUT... | ERROR
+//               (rows/cols in NEW, ATTACH and RESIZE are clamped to 500/1000 by the daemon)
 //   VIEW        u32 id  (read-only screen)         -> SNAPSHOT..., then OK(str color resets) | ERROR
 //   RESIZE      u16 rows, u16 cols
 //   INPUT       raw bytes (client -> daemon)
@@ -106,6 +109,7 @@ class PayloadReader {
   std::string str();
   std::vector<std::string> strs();
   bool ok() const { return ok_; }
+  bool at_end() const { return pos_ >= p_.size(); }
 
  private:
   bool need(std::size_t n);

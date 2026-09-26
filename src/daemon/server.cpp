@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <sys/epoll.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -15,7 +16,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
+#include <set>
 #include <utility>
 
 #include "common/config.hpp"
@@ -29,6 +32,9 @@ constexpr std::size_t kOutputHighWater = 1 << 20;
 constexpr auto kKillGrace = std::chrono::seconds(3);
 constexpr auto kDrainGrace = std::chrono::seconds(1);
 constexpr std::size_t kSnapshotChunk = 1 << 20;
+// A client whose unsent output (beyond its last snapshot), or whose session's unwritten input,
+// exceeds this is dropped.
+constexpr std::size_t kMaxQueue = std::size_t(64) << 20;
 
 enum class Tag : std::uint64_t { Listen = 1, Signal, Client, Master };
 
@@ -40,6 +46,39 @@ bool valid_name(std::string_view name) {
   if (name.empty() || name.front() == '-') return false;
   return std::none_of(name.begin(), name.end(),
                       [](unsigned char ch) { return ch < 0x20 || ch == 0x7f; });
+}
+
+// Client-supplied sizes are clamped before they reach libvterm or TIOCSWINSZ.
+int clamp_rows(int rows) {
+  return std::min(rows, Screen::kMaxRows);
+}
+
+int clamp_cols(int cols) {
+  return std::min(cols, Screen::kMaxCols);
+}
+
+// st_rdev of a terminal device path; 0 if it is not one.
+dev_t tty_device(const std::string& path) {
+  struct stat st {};
+  if (path.empty() || stat(path.c_str(), &st) != 0 || !S_ISCHR(st.st_mode)) return 0;
+  return st.st_rdev;
+}
+
+// Prints an error on stderr and appends it, timestamped, to ~/.pmux/daemon.log.
+void log_error(const std::string& message) {
+  std::fprintf(stderr, "pmux: %s\n", message.c_str());
+  const std::string home = home_dir();
+  if (home.empty()) return;
+  const std::string dir = home + "/.pmux";
+  mkdir(dir.c_str(), 0700);
+  UniqueFd fd(open((dir + "/daemon.log").c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600));
+  if (!fd) return;
+  char stamp[32] = "";
+  const std::time_t now = std::time(nullptr);
+  std::tm tm {};
+  if (localtime_r(&now, &tm)) std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
+  const std::string line = std::string(stamp) + " pmux[" + std::to_string(getpid()) + "]: " + message + "\n";
+  (void)!write(fd.get(), line.data(), line.size());
 }
 
 Frame ok_frame(std::vector<std::uint8_t> payload = {}) {
@@ -71,6 +110,8 @@ Server::Server(UniqueFd listen_fd) : listen_fd_(std::move(listen_fd)) {}
 
 bool Server::setup() {
   signal(SIGPIPE, SIG_IGN);
+  // An inherited SIG_IGN would make the kernel reap children before waitpid sees them.
+  signal(SIGCHLD, SIG_DFL);
   sigset_t mask;
   sigemptyset(&mask);
   for (int sig : {SIGCHLD, SIGTERM, SIGINT, SIGHUP}) sigaddset(&mask, sig);
@@ -90,14 +131,14 @@ bool Server::setup() {
 
 int Server::run() {
   if (!setup()) {
-    std::perror("pmux: daemon setup");
+    log_error(std::string("daemon setup: ") + std::strerror(errno));
     return 1;
   }
   while (running_) {
     epoll_event events[64];
     const int n = epoll_wait(epoll_fd_.get(), events, 64, timeout_ms());
     if (n < 0 && errno != EINTR) {
-      std::perror("pmux: epoll_wait");
+      log_error(std::string("epoll_wait: ") + std::strerror(errno));
       return 1;
     }
     for (int i = 0; i < n; ++i) {
@@ -221,8 +262,9 @@ void Server::do_new(Client& c, const Frame& frame) {
   spec.dir = r.str();
   spec.argv = r.strs();
   spec.env = r.strs();
-  spec.rows = r.u16();
-  spec.cols = r.u16();
+  spec.rows = clamp_rows(r.u16());
+  spec.cols = clamp_cols(r.u16());
+  if (!r.at_end()) spec.umask = int(r.u32() & 0777);
   if (!r.ok()) return send(c, error_frame("malformed request"));
   spec.scrollback_lines = load_config_quiet().scrollback_lines;
 
@@ -269,16 +311,21 @@ void Server::do_rename(Client& c, const Frame& frame) {
 void Server::do_attach(Client& c, const Frame& frame) {
   PayloadReader r(frame.payload);
   const std::uint32_t id = r.u32();
-  const int rows = r.u16();
-  const int cols = r.u16();
+  const int rows = clamp_rows(r.u16());
+  const int cols = clamp_cols(r.u16());
   const std::string tty = r.str();
   if (!r.ok()) return send(c, error_frame("malformed request"));
   Proc* p = find_proc(id);
   if (!p) return send(c, error_frame("no such process"));
   if (p->session->exited()) return send(c, error_frame(p->session->name() + " has exited"));
-  // A client running inside the process itself would feed the process its own output.
-  if (!tty.empty() && tty == p->session->tty_path())
+  // A client running inside the process itself would feed the process its own output; so would
+  // one whose output reaches the process through a chain of attached clients.
+  const dev_t rdev = tty_device(tty);
+  if ((rdev != 0 && rdev == p->session->tty_rdev()) || (!tty.empty() && tty == p->session->tty_path()))
     return send(c, error_frame("cannot attach " + p->session->name() + " to itself"));
+  if (attach_loop(c, *p, rdev))
+    return send(c, error_frame("cannot attach " + p->session->name() + ": would create an attach loop"));
+  c.tty_rdev = rdev;
 
   if (Proc* old = find_proc(c.attached); old && old != p) {
     old->attached = 0;
@@ -323,14 +370,15 @@ void Server::do_view(Client& c, const Frame& frame) {
 }
 
 void Server::send_snapshot(Client& c, const std::string& bytes) {
+  c.snapshot_size = bytes.size();  // bounded by the scrollback size, however large
   for (std::size_t off = 0; off < bytes.size(); off += kSnapshotChunk)
     send(c, bytes_frame(MsgType::Snapshot, std::string_view(bytes).substr(off, kSnapshotChunk)));
 }
 
 void Server::do_resize(Client& c, const Frame& frame) {
   PayloadReader r(frame.payload);
-  const int rows = r.u16();
-  const int cols = r.u16();
+  const int rows = clamp_rows(r.u16());
+  const int cols = clamp_cols(r.u16());
   Proc* p = find_proc(c.attached);
   if (r.ok() && p) p->session->resize(rows, cols);
 }
@@ -338,6 +386,10 @@ void Server::do_resize(Client& c, const Frame& frame) {
 void Server::do_input(Client& c, const Frame& frame) {
   Proc* p = find_proc(c.attached);
   if (!p) return;
+  if (p->session->pending_input() + frame.payload.size() > kMaxQueue) {
+    c.dead = true;  // the process is not reading its input
+    return;
+  }
   p->session->queue_input({reinterpret_cast<const char*>(frame.payload.data()), frame.payload.size()});
   update_master_events(*p);
 }
@@ -373,6 +425,7 @@ void Server::send(Client& c, const Frame& frame) {
   const auto bytes = encode_frame(frame);
   c.out.append(bytes.begin(), bytes.end());
   flush(c);
+  if (c.pending() > kMaxQueue + c.snapshot_size) c.dead = true;  // the client is not reading
 }
 
 void Server::flush(Client& c) {
@@ -546,6 +599,27 @@ Server::Proc* Server::find_proc(std::uint32_t id) {
   return it == procs_.end() ? nullptr : &it->second;
 }
 
+Server::Proc* Server::find_proc_by_tty(dev_t rdev) {
+  if (rdev == 0) return nullptr;
+  for (auto& [id, p] : procs_)
+    if (p.session->tty_rdev() == rdev) return &p;
+  return nullptr;
+}
+
+// Would attaching client `c` (on terminal `tty`) to `target` feed target's output back into
+// it? Follows: the process whose PTY is c's terminal -> the client attached to that process ->
+// the process whose PTY is that client's terminal -> ...
+bool Server::attach_loop(const Client& c, const Proc& target, dev_t tty) {
+  std::set<std::uint32_t> visited;
+  for (Proc* cur = find_proc_by_tty(tty); cur && visited.insert(cur->session->id()).second;) {
+    if (cur == &target) return true;
+    const Client* holder = find_client(cur->attached);
+    if (!holder || holder == &c) return false;
+    cur = find_proc_by_tty(holder->tty_rdev);
+  }
+  return false;
+}
+
 bool Server::name_taken(std::string_view name) const {
   return std::any_of(procs_.begin(), procs_.end(),
                      [&](const auto& entry) { return entry.second.session->name() == name; });
@@ -560,9 +634,10 @@ std::string Server::default_name(const std::string& dir) const {
 }
 
 int run_daemon() {
+  prctl(PR_SET_NAME, "pmux", 0, 0, 0);  // spawned via /proc/self/exe, it would show as "exe"
   std::string error;
   if (!ensure_socket_dir(error)) {
-    std::fprintf(stderr, "pmux: %s\n", error.c_str());
+    log_error(error);
     return 1;
   }
   const std::string pid_file = pid_path();
@@ -571,23 +646,23 @@ int run_daemon() {
   // The pidfile doubles as the single-instance lock.
   UniqueFd pid_fd(open(pid_file.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600));
   if (!pid_fd) {
-    std::fprintf(stderr, "pmux: %s: %s\n", pid_file.c_str(), std::strerror(errno));
+    log_error(pid_file + ": " + std::strerror(errno));
     return 1;
   }
   if (flock(pid_fd.get(), LOCK_EX | LOCK_NB) != 0) {
-    std::fprintf(stderr, "pmux: daemon already running\n");
+    log_error("daemon already running");
     return 1;
   }
   const std::string pid_text = std::to_string(getpid()) + "\n";
   if (ftruncate(pid_fd.get(), 0) != 0 ||
       pwrite(pid_fd.get(), pid_text.data(), pid_text.size(), 0) != ssize_t(pid_text.size())) {
-    std::fprintf(stderr, "pmux: %s: %s\n", pid_file.c_str(), std::strerror(errno));
+    log_error(pid_file + ": " + std::strerror(errno));
     return 1;
   }
 
   UniqueFd listen_fd = listen_on(sock, error);
   if (!listen_fd) {
-    std::fprintf(stderr, "pmux: %s\n", error.c_str());
+    log_error(error);
     unlink(pid_file.c_str());
     return 1;
   }
