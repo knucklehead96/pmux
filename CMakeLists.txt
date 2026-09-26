@@ -24,7 +24,6 @@ add_executable(pmux
   src/daemon/server.cpp
   src/daemon/session.cpp
   src/daemon/screen.cpp
-  src/daemon/bell.cpp
   src/client/connect.cpp
   src/client/tui.cpp
   src/client/attach.cpp

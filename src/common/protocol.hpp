@@ -17,12 +17,15 @@ namespace pmux {
 //   RENAME      u32 id, str name                   -> OK | ERROR
 //   KILL        u32 id  (exited: removes it)       -> OK once the process has exited | ERROR
 //   REMOVE      u32 id  (exited processes only)    -> OK | ERROR
-//   ATTACH      u32 id, u16 rows, u16 cols         -> OK, then OUTPUT... | ERROR
+//   ATTACH      u32 id, u16 rows, u16 cols         -> OK, SNAPSHOT..., then OUTPUT... | ERROR
+//   VIEW        u32 id  (read-only screen)         -> SNAPSHOT..., then OK(str color resets) | ERROR
 //   RESIZE      u16 rows, u16 cols
 //   INPUT       raw bytes (client -> daemon)
 //   OUTPUT      raw bytes (daemon -> client)
-//   DETACH      -  (daemon -> client: attached elsewhere)
-//   EXITED      i32 wait status
+//   SNAPSHOT    raw bytes (daemon -> client): screen restore, written verbatim; may span frames
+//   DETACH      client -> daemon: -  (detach request; answered with DETACH)
+//               daemon -> client: str color resets  (reply, or attached elsewhere)
+//   EXITED      i32 wait status, str color resets
 //   ERROR       str message
 enum class MsgType : std::uint8_t {
   List = 1,
@@ -40,6 +43,7 @@ enum class MsgType : std::uint8_t {
   Exited,
   Error,
   Ok,
+  View,
 };
 
 struct Frame {

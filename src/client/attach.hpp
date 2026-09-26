@@ -25,6 +25,15 @@ struct AttachResult {
 // or exit. Prints nothing; `prelude` is written to the terminal once the daemon accepted.
 AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string_view prelude = {});
 
+struct ViewResult {
+  bool ok = false;
+  std::string error;
+};
+
+// Shows a session's screen read-only (the final screen of an exited process) in raw mode
+// until any key is pressed, then resets terminal modes as on detach.
+ViewResult view_session(int daemon_fd, std::uint32_t session_id);
+
 // CLI attach: attach_session plus the [detached ...] / [... exited ...] messages on stderr.
 // Returns the exit code for pmux.
 int attach(int daemon_fd, std::uint32_t session_id, const std::string& name);

@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "common/fd.hpp"
-#include "daemon/bell.hpp"
+#include "daemon/screen.hpp"
 
 namespace pmux {
 
@@ -23,6 +23,7 @@ struct SessionSpec {
   std::vector<std::string> env;
   int rows = 24;
   int cols = 80;
+  std::size_t scrollback_lines = 10000;
 };
 
 // One managed process: its PTY master and metadata.
@@ -49,8 +50,10 @@ class Session {
   // argv of the PTY's foreground process group leader, joined by spaces; empty if unknown.
   std::string fg_command() const;
 
-  // Reads one chunk of PTY output into `out`.
-  ReadStatus read_output(std::string& out);
+  // Reads one chunk of PTY output into `out` and feeds it to the screen. While detached,
+  // terminal query replies go back to the PTY and BEL sets the bell flag.
+  ReadStatus read_output(std::string& out, bool attached);
+  Screen& screen() { return *screen_; }
   void queue_input(std::string_view data);
   void flush_input();
   bool has_pending_input() const { return !input_.empty(); }
@@ -81,7 +84,7 @@ class Session {
   SystemClock::time_point created_;
   SteadyClock::time_point last_activity_;
   std::optional<SystemClock::time_point> last_output_;
-  BellScanner bell_scanner_;
+  std::unique_ptr<Screen> screen_;
   bool bell_ = false;
   std::string input_;
   std::optional<int> reaped_;

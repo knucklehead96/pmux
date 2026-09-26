@@ -56,6 +56,9 @@ class Server {
   void do_new(Client& c, const Frame& frame);
   void do_rename(Client& c, const Frame& frame);
   void do_attach(Client& c, const Frame& frame);
+  void do_detach(Client& c);
+  void do_view(Client& c, const Frame& frame);
+  void send_snapshot(Client& c, const std::string& bytes);
   void do_resize(Client& c, const Frame& frame);
   void do_input(Client& c, const Frame& frame);
   void do_kill(Client& c, const Frame& frame);

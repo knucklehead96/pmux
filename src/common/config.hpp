@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,7 +15,11 @@ struct Config {
   std::string default_cmd;  // expanded; empty if unset
   ThemeMode theme = ThemeMode::Auto;
   Accent accent = Accent::Clay;
+  std::size_t scrollback_lines = 10000;  // 0..100000
 };
+
+// Reads ~/.pmux/config without printing warnings (for the daemon).
+Config load_config_quiet();
 
 // Reads ~/.pmux/config (missing file = defaults); warnings go to stderr.
 Config load_config();

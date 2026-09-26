@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <utility>
 
+#include "common/config.hpp"
 #include "common/paths.hpp"
 
 namespace pmux {
@@ -27,6 +28,7 @@ namespace {
 constexpr std::size_t kOutputHighWater = 1 << 20;
 constexpr auto kKillGrace = std::chrono::seconds(3);
 constexpr auto kDrainGrace = std::chrono::seconds(1);
+constexpr std::size_t kSnapshotChunk = 1 << 20;
 
 enum class Tag : std::uint64_t { Listen = 1, Signal, Client, Master };
 
@@ -173,6 +175,8 @@ void Server::handle_frame(Client& c, const Frame& frame) {
     case MsgType::New: do_new(c, frame); break;
     case MsgType::Rename: do_rename(c, frame); break;
     case MsgType::Attach: do_attach(c, frame); break;
+    case MsgType::Detach: do_detach(c); break;
+    case MsgType::View: do_view(c, frame); break;
     case MsgType::Resize: do_resize(c, frame); break;
     case MsgType::Input: do_input(c, frame); break;
     case MsgType::Kill: do_kill(c, frame); break;
@@ -220,6 +224,7 @@ void Server::do_new(Client& c, const Frame& frame) {
   spec.rows = r.u16();
   spec.cols = r.u16();
   if (!r.ok()) return send(c, error_frame("malformed request"));
+  spec.scrollback_lines = load_config_quiet().scrollback_lines;
 
   std::error_code ec;
   if (spec.dir.empty() || spec.dir.front() != '/' || !std::filesystem::is_directory(spec.dir, ec))
@@ -277,15 +282,45 @@ void Server::do_attach(Client& c, const Frame& frame) {
   }
   if (Client* prev = find_client(p->attached); prev && prev != &c) {
     prev->attached = 0;
-    send(*prev, make_frame(MsgType::Detach));
+    send(*prev, make_frame(MsgType::Detach, PayloadWriter().str(p->session->screen().color_resets()).take()));
   }
   p->attached = c.id;
   c.attached = id;
   p->session->clear_bell();
   send(c, ok_frame());
+  // Reflow to the client size and snapshot first; then resize the PTY and signal back to back
+  // so the kernel's SIGWINCH (size change) and ours reach the app together.
+  p->session->screen().resize(rows, cols);
+  send_snapshot(c, p->session->screen().snapshot(true));
   p->session->resize(rows, cols);
   p->session->notify_winch();
   update_master_events(*p);
+}
+
+void Server::do_detach(Client& c) {
+  std::string resets;
+  if (Proc* p = find_proc(c.attached); p && p->attached == c.id) {
+    resets = p->session->screen().color_resets();
+    p->attached = 0;
+    update_master_events(*p);
+  }
+  c.attached = 0;
+  send(c, make_frame(MsgType::Detach, PayloadWriter().str(resets).take()));
+}
+
+void Server::do_view(Client& c, const Frame& frame) {
+  PayloadReader r(frame.payload);
+  const std::uint32_t id = r.u32();
+  Proc* p = r.ok() ? find_proc(id) : nullptr;
+  if (!p) return send(c, error_frame("no such process"));
+  Screen& screen = p->session->screen();
+  send_snapshot(c, screen.snapshot(false));
+  send(c, ok_frame(PayloadWriter().str(screen.color_resets()).take()));
+}
+
+void Server::send_snapshot(Client& c, const std::string& bytes) {
+  for (std::size_t off = 0; off < bytes.size(); off += kSnapshotChunk)
+    send(c, bytes_frame(MsgType::Snapshot, std::string_view(bytes).substr(off, kSnapshotChunk)));
 }
 
 void Server::do_resize(Client& c, const Frame& frame) {
@@ -419,14 +454,13 @@ void Server::read_master(Proc& p) {
   Session& s = *p.session;
   std::string chunk;
   for (int i = 0; i < 16 && !output_paused(p); ++i) {
-    const auto status = s.read_output(chunk);
+    const auto status = s.read_output(chunk, p.attached != 0);
     if (status == Session::ReadStatus::Again) break;
     if (status == Session::ReadStatus::Eof) {
       close_master(p);
       if (s.reaped()) finalize(p);
       return;
     }
-    // Detached output is discarded until libvterm lands (M3).
     if (Client* c = find_client(p.attached)) send(*c, bytes_frame(MsgType::Output, chunk));
   }
   update_master_events(p);
@@ -465,7 +499,8 @@ void Server::finalize(Proc& p) {
   p.reap_deadline.reset();
   if (Client* c = find_client(p.attached)) {
     c->attached = 0;
-    send(*c, make_frame(MsgType::Exited, PayloadWriter().i32(s.exit_status()).take()));
+    send(*c, make_frame(MsgType::Exited,
+                        PayloadWriter().i32(s.exit_status()).str(s.screen().color_resets()).take()));
   }
   p.attached = 0;
   for (std::uint32_t cid : std::exchange(p.kill_waiters, {}))

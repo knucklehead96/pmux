@@ -94,17 +94,21 @@ std::unique_ptr<Session> Session::spawn(std::uint32_t id, const SessionSpec& spe
   s->argv_ = spec.argv;
   s->created_ = SystemClock::now();
   s->last_activity_ = SteadyClock::now();
+  s->screen_ = std::make_unique<Screen>(spec.rows, spec.cols, spec.scrollback_lines);
   return s;
 }
 
-Session::ReadStatus Session::read_output(std::string& out) {
+Session::ReadStatus Session::read_output(std::string& out, bool attached) {
   char buf[65536];
   const ssize_t n = read(master_.get(), buf, sizeof buf);
   if (n > 0) {
     out.assign(buf, std::size_t(n));
     last_activity_ = SteadyClock::now();
     last_output_ = SystemClock::now();
-    if (bell_scanner_.feed(buf, std::size_t(n))) bell_ = true;
+    screen_->feed(buf, std::size_t(n));
+    if (screen_->take_bell() && !attached) bell_ = true;
+    const std::string replies = screen_->take_replies();
+    if (!attached && !replies.empty()) queue_input(replies);
     return ReadStatus::Data;
   }
   if (n < 0 && (errno == EAGAIN || errno == EINTR)) return ReadStatus::Again;
@@ -149,6 +153,7 @@ void Session::resize(int rows, int cols) {
   ws.ws_row = static_cast<unsigned short>(rows);
   ws.ws_col = static_cast<unsigned short>(cols);
   ioctl(master_.get(), TIOCSWINSZ, &ws);
+  screen_->resize(rows, cols);
 }
 
 void Session::notify_winch() {

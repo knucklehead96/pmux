@@ -398,11 +398,21 @@ class Navigation(TuiCase):
         self.detach_to_list(t, "app", "other")
 
     def test_enter_on_exited(self):
-        self.new_exited("done", "exit 4")
-        t = self.start_list("done")
+        self.new_exited("first", "echo first-output; exit 0")
+        self.new_exited("done", "echo done-final-output; exit 4")
+        t = self.start_list("first", "done")
+        self.wait_selected(t, "first")
+        t.keys("Down")
+        self.wait_selected(t, "done")
         t.keys("Enter")
-        lines = t.wait_for(lambda l: "done has exited" in l[-1], msg="footer message")
-        self.assertTrue(lines[0].startswith(" ✻ pmux"), dump(lines))
+        lines = t.wait_for(lambda l: any("done-final-output" in x for x in l),
+                           msg="final screen of the selected exited process")
+        self.assertFalse(lines[0].startswith(" ✻ pmux"), "final screen, not the list\n" + dump(lines))
+        self.assertFalse(any("first-output" in x for x in lines), dump(lines))
+        t.keys("Up")                        # closes the view; must not move the selection
+        t.wait_list("first", "done")
+        self.wait_selected(t, "done")
+        self.assertNotIn("has exited", t.footer(), dump(t.screen()))
 
     def test_exit_while_attached(self):
         self.marker("app", self.api, "exit", "7")

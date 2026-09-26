@@ -26,13 +26,16 @@ using Clock = std::chrono::steady_clock;
 constexpr std::string_view kDetachSeqs[] = {"\x1b[92;5u", "\x1b[92;5:1u"};
 constexpr std::string_view kReleaseSeq = "\x1b[92;5:3u";
 constexpr auto kHoldTime = std::chrono::milliseconds(20);
+constexpr int kDetachReplyTimeoutMs = 1000;
 
 constexpr std::string_view kModeResets =
     "\x1b[?1049l"
-    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+    "\x1b[?1l\x1b>"
     "\x1b[?2004l"
     "\x1b[?1004l"
     "\x1b[?25h"
+    "\x1b[?7h"
     "\x1b[0m"
     "\x1b[<99u";
 
@@ -66,8 +69,11 @@ class Passthrough {
 
   Outcome run();
   int exit_status() const { return exit_status_; }
+  // OSC color resets the daemon sent with DETACH / EXITED.
+  const std::string& color_resets() const { return color_resets_; }
 
  private:
+  Outcome detach();
   std::optional<Outcome> handle(const Frame& frame);
   bool read_socket();
   std::optional<Outcome> read_stdin();
@@ -80,6 +86,7 @@ class Passthrough {
   std::string held_;
   Clock::time_point held_since_;
   int exit_status_ = 0;
+  std::string color_resets_;
   bool lost_ = false;
 };
 
@@ -114,19 +121,45 @@ Outcome Passthrough::run() {
       send_resize();
     }
     if (fds[1].revents)
-      if (auto outcome = read_stdin()) return *outcome;
+      if (auto outcome = read_stdin()) return *outcome == Outcome::Detached ? detach() : *outcome;
+  }
+}
+
+// Asks the daemon to detach us and waits for its DETACH (or EXITED) reply with the color
+// resets. Output that arrives meanwhile is dropped.
+Outcome Passthrough::detach() {
+  if (!send_frame(sock_, make_frame(MsgType::Detach))) return Outcome::Detached;
+  const auto deadline = Clock::now() + std::chrono::milliseconds(kDetachReplyTimeoutMs);
+  for (;;) {
+    while (auto frame = decoder_.next()) {
+      if (frame->type == MsgType::Detach || frame->type == MsgType::Exited) {
+        handle(*frame);
+        return Outcome::Detached;
+      }
+    }
+    const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    if (decoder_.bad() || left <= 0) return Outcome::Detached;
+    pollfd fd = {sock_, POLLIN, 0};
+    const int n = poll(&fd, 1, static_cast<int>(left));
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0 || !read_socket()) return Outcome::Detached;
   }
 }
 
 std::optional<Outcome> Passthrough::handle(const Frame& frame) {
   switch (frame.type) {
     case MsgType::Output:
+    case MsgType::Snapshot:
       if (!write_all(STDOUT_FILENO, frame.payload.data(), frame.payload.size())) return Outcome::Lost;
       return std::nullopt;
-    case MsgType::Exited:
-      exit_status_ = PayloadReader(frame.payload).i32();
+    case MsgType::Exited: {
+      PayloadReader r(frame.payload);
+      exit_status_ = r.i32();
+      color_resets_ = r.str();
       return Outcome::Exited;
+    }
     case MsgType::Detach:
+      color_resets_ = PayloadReader(frame.payload).str();
       return Outcome::AttachedElsewhere;
     case MsgType::Error:
       return Outcome::Lost;
@@ -259,6 +292,8 @@ AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string
 
   tcsetattr(STDIN_FILENO, TCSADRAIN, &saved);
   write_all(STDOUT_FILENO, kModeResets.data(), kModeResets.size());
+  const std::string& resets = passthrough.color_resets();
+  if (!resets.empty()) write_all(STDOUT_FILENO, resets.data(), resets.size());
   restore_mask();
 
   result.wait_status = passthrough.exit_status();
@@ -268,6 +303,56 @@ AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string
     case Outcome::Exited: result.outcome = AttachOutcome::Exited; break;
     case Outcome::Lost: result.outcome = AttachOutcome::Lost; break;
   }
+  return result;
+}
+
+ViewResult view_session(int daemon_fd, std::uint32_t session_id) {
+  ViewResult result;
+  if (!isatty(STDIN_FILENO)) {
+    result.error = "stdin is not a terminal";
+    return result;
+  }
+  termios saved{};
+  tcgetattr(STDIN_FILENO, &saved);
+  termios raw = saved;
+  cfmakeraw(&raw);
+  tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+  std::string resets;
+  FrameDecoder decoder;
+  bool shown = false;
+  if (send_frame(daemon_fd, make_frame(MsgType::View, PayloadWriter().u32(session_id).take()))) {
+    while (auto frame = recv_frame(daemon_fd, decoder, 5000)) {
+      if (frame->type == MsgType::Snapshot) {
+        write_all(STDOUT_FILENO, frame->payload.data(), frame->payload.size());
+        continue;
+      }
+      if (frame->type == MsgType::Ok) {
+        resets = PayloadReader(frame->payload).str();
+        shown = true;
+      } else if (frame->type == MsgType::Error) {
+        result.error = PayloadReader(frame->payload).str();
+      }
+      break;
+    }
+  }
+  if (shown) {
+    // Any key returns.
+    char buf[256];
+    for (;;) {
+      const ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+      if (n < 0 && errno == EINTR) continue;
+      break;
+    }
+    tcflush(STDIN_FILENO, TCIFLUSH);
+    result.ok = true;
+  } else if (result.error.empty()) {
+    result.error = "lost connection to daemon";
+  }
+
+  tcsetattr(STDIN_FILENO, TCSADRAIN, &saved);
+  write_all(STDOUT_FILENO, kModeResets.data(), kModeResets.size());
+  if (!resets.empty()) write_all(STDOUT_FILENO, resets.data(), resets.size());
   return result;
 }
 

@@ -118,13 +118,19 @@ def dump(lines, title="screen"):
 
 
 class Cell:
-    __slots__ = ("ch", "fg", "bg", "bold", "dim", "underline", "reverse")
+    __slots__ = ("ch", "fg", "bg", "bold", "dim", "underline", "reverse", "italic", "strike")
 
     def __init__(self, ch, st):
         self.ch = ch
         self.fg, self.bg = st["fg"], st["bg"]
         self.bold, self.dim = st["bold"], st["dim"]
         self.underline, self.reverse = st["underline"], st["reverse"]
+        self.italic, self.strike = st["italic"], st["strike"]
+
+    def key(self):
+        """Everything capture-pane -e reports about the cell, for equality."""
+        return (self.ch, self.fg, self.bg, self.bold, self.dim, self.underline,
+                self.reverse, self.italic, self.strike)
 
     def __repr__(self):
         return "Cell(%r fg=%r bg=%r%s%s%s)" % (
@@ -134,7 +140,7 @@ class Cell:
 
 def _default_state():
     return {"fg": None, "bg": None, "bold": False, "dim": False,
-            "underline": False, "reverse": False}
+            "underline": False, "reverse": False, "italic": False, "strike": False}
 
 
 def _apply_sgr(st, params):
@@ -156,6 +162,14 @@ def _apply_sgr(st, params):
             st["underline"] = not (len(sub) > 1 and sub[1] == "0")
         elif p == 24:
             st["underline"] = False
+        elif p == 3:
+            st["italic"] = True
+        elif p == 23:
+            st["italic"] = False
+        elif p == 9:
+            st["strike"] = True
+        elif p == 29:
+            st["strike"] = False
         elif p == 7:
             st["reverse"] = True
         elif p == 27:
@@ -300,6 +314,23 @@ class TmuxTui:
     def modes(self):
         """(alternate_on, mouse_any_flag) of the pane, e.g. ('0', '0')."""
         return tuple(self.display("#{alternate_on} #{mouse_any_flag}").split())
+
+    def fmt(self, *names):
+        """{name: value} of tmux format variables, e.g. fmt('cursor_x')."""
+        sep = "<@fmt@>"   # tmux escapes control characters in the output
+        vals = self.display(sep.join("#{%s}" % n for n in names)).split(sep)
+        return dict(zip(names, vals))
+
+    def cursor(self):
+        """(x, y) cursor position in the pane, 0-based."""
+        f = self.fmt("cursor_x", "cursor_y")
+        return int(f["cursor_x"]), int(f["cursor_y"])
+
+    def history(self):
+        """Full pane text: tmux scrollback history followed by the visible
+        screen (capture-pane -p -S -), lines rstripped."""
+        out = self.tmux("capture-pane", "-p", "-S", "-", "-t", self.target).stdout
+        return [l.rstrip() for l in out.decode("utf-8", errors="replace").split("\n")]
 
     def pane_pid(self):
         """pid of the pane's process (the exit-status sh wrapper)."""

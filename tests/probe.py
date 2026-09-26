@@ -29,6 +29,17 @@ Modes:
   exit <code> [delay]   Exit on the first input byte or after <delay>
                         seconds (if given).  <code> is an int exit status or
                         'sig<N>' to die by signal N.
+  draw <script> [key=value ...]
+                        Write the bytes of file <script> to stdout once at
+                        startup (before the ready file), then idle.  Options:
+                          winch=<file>  write <file>'s bytes on every SIGWINCH
+                          wlog=<path>   append "R C\n" on every SIGWINCH
+                          usr1=<file>   write <file>'s bytes on every SIGUSR1,
+                                        then append "1\n" to <file>.done
+                          inlog=<path>  append every input byte to <path>
+                          exit=<code>   exit with <code> 0.3 s after startup
+                        Nothing is ever written in response to input, so the
+                        screen only changes through these scripts.
 """
 import fcntl
 import json
@@ -38,6 +49,7 @@ import signal
 import struct
 import sys
 import termios
+import time
 import tty
 
 TERMINATOR = b"\x00ENDPROBE"
@@ -159,6 +171,29 @@ def main(argv):
     elif mode == "exit":
         code = args[0]
         delay = float(args[1]) if len(args) > 1 else None
+    elif mode == "draw":
+        opts = dict(a.split("=", 1) for a in args[1:])
+        with open(args[0], "rb") as f:
+            write_all(1, f.read())
+        handlers = {}
+        if "winch" in opts or "wlog" in opts:
+            handlers[signal.SIGWINCH] = ("winch", opts.get("winch"), opts.get("wlog"))
+        if "usr1" in opts:
+            handlers[signal.SIGUSR1] = ("usr1", opts["usr1"], None)
+        for signo, (_kind, out_file, wlog) in handlers.items():
+            out = None
+            if out_file:
+                with open(out_file, "rb") as f:
+                    out = f.read()
+
+            def handler(s, _f, out=out, out_file=out_file, wlog=wlog):
+                if s == signal.SIGWINCH and wlog:
+                    append(wlog, b"%d %d\n" % winsize())
+                if out is not None:
+                    write_all(1, out)
+                    if s == signal.SIGUSR1:
+                        append(out_file + ".done", b"1\n")
+            signal.signal(signo, handler)
     else:
         sys.stderr.write("probe: unknown mode %r\n" % mode)
         return 2
@@ -204,6 +239,17 @@ def main(argv):
                     fire = True
             if fire:
                 write_all(1, payload)
+    elif mode == "draw":
+        if "exit" in opts:
+            time.sleep(0.3)  # let the daemon drain the output first
+            os._exit(int(opts["exit"]))
+        log_path = opts.get("inlog")
+        while True:
+            data = read_input()
+            if data == b"":
+                signal.pause()
+            elif data and log_path:
+                append(log_path, data)
     elif mode == "exit":
         read_input(delay)
         if code.startswith("sig"):

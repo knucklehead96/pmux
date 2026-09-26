@@ -51,7 +51,6 @@ constexpr int kRequestTimeoutMs = 5000;
 constexpr int kKillTimeoutMs = 10000;
 constexpr auto kPollInterval = std::chrono::milliseconds(500);
 constexpr auto kDoubleClick = std::chrono::milliseconds(400);
-constexpr auto kShortNote = std::chrono::seconds(2);
 constexpr auto kLongNote = std::chrono::seconds(3);
 
 // ---------------------------------------------------------------- theme
@@ -547,6 +546,7 @@ class Tui {
   void note(std::string text, bool error, SteadyClock::duration d);
   void attach_to(const ProcInfo& p, bool via_mouse);
   void attach_selected(bool via_mouse);
+  void view_exited(const ProcInfo& p, bool via_mouse);
   void open_dialog();
   void submit_dialog();
   void start_rename();
@@ -726,7 +726,7 @@ void Tui::attach_to(const ProcInfo& proc, bool via_mouse) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       tcflush(STDIN_FILENO, TCIFLUSH);
     }
-    result = attach_session(fd.get(), id, "\x1b[H\x1b[2J");
+    result = attach_session(fd.get(), id);
   })();
   {
     std::lock_guard lock(poller_->m);
@@ -759,10 +759,40 @@ void Tui::attach_selected(bool via_mouse) {
   const ProcInfo* p = selected();
   if (!p) return;
   if (p->exited) {
-    note(p->name + " has exited", false, kShortNote);
+    view_exited(*p, via_mouse);
     return;
   }
   attach_to(*p, via_mouse);
+}
+
+void Tui::view_exited(const ProcInfo& proc, bool via_mouse) {
+  const std::uint32_t id = proc.id;
+  UniqueFd fd = connect_daemon();
+  if (!fd) {
+    note("cannot connect to daemon", true, kLongNote);
+    return;
+  }
+  {
+    std::lock_guard lock(poller_->m);
+    poller_->paused = true;
+  }
+  ViewResult result;
+  screen_.WithRestoredIO([&] {
+    if (via_mouse) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      tcflush(STDIN_FILENO, TCIFLUSH);
+    }
+    result = view_session(fd.get(), id);
+  })();
+  {
+    std::lock_guard lock(poller_->m);
+    poller_->paused = false;
+  }
+  fd.reset();
+  note_.reset();
+  if (!result.ok) note(result.error, true, kLongNote);
+  selected_ = id;
+  refresh_now();
 }
 
 void Tui::open_dialog() {

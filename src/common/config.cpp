@@ -51,6 +51,26 @@ std::optional<Accent> parse_accent(std::string_view v) {
   return std::nullopt;
 }
 
+// A decimal integer in [0, max].
+std::optional<std::size_t> parse_count(std::string_view v, std::size_t max) {
+  if (v.empty() || v.size() > 9) return std::nullopt;
+  std::size_t n = 0;
+  for (const char ch : v) {
+    if (ch < '0' || ch > '9') return std::nullopt;
+    n = n * 10 + std::size_t(ch - '0');
+  }
+  if (n > max) return std::nullopt;
+  return n;
+}
+
+std::string read_config_text() {
+  const std::string home = home_dir();
+  if (home.empty()) return {};
+  std::ifstream in(home + "/.pmux/config", std::ios::binary);
+  if (!in) return {};
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 }  // namespace
 
 std::string home_dir() {
@@ -156,6 +176,9 @@ Config parse_config(std::string_view text, std::vector<std::string>& warnings) {
     } else if (key == "accent") {
       if (auto accent = parse_accent(value)) config.accent = *accent;
       else invalid();
+    } else if (key == "scrollback_lines") {
+      if (auto n = parse_count(value, 100000)) config.scrollback_lines = *n;
+      else invalid();
     } else {
       warnings.push_back(where + "unknown key '" + key + "'");
     }
@@ -164,15 +187,15 @@ Config parse_config(std::string_view text, std::vector<std::string>& warnings) {
 }
 
 Config load_config() {
-  const std::string home = home_dir();
-  if (home.empty()) return {};
-  std::ifstream in(home + "/.pmux/config", std::ios::binary);
-  if (!in) return {};
-  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   std::vector<std::string> warnings;
-  Config config = parse_config(text, warnings);
+  Config config = parse_config(read_config_text(), warnings);
   for (const auto& w : warnings) std::fprintf(stderr, "pmux: %s\n", w.c_str());
   return config;
+}
+
+Config load_config_quiet() {
+  std::vector<std::string> warnings;
+  return parse_config(read_config_text(), warnings);
 }
 
 }  // namespace pmux
