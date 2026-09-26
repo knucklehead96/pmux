@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(pmux VERSION 0.1.0 LANGUAGES CXX)
+project(pmux
+  VERSION 0.1.0
+  DESCRIPTION "Terminal process multiplexer with a list TUI and byte-exact attach"
+  HOMEPAGE_URL "https://github.com/knucklehead96/pmux"
+  LANGUAGES CXX)
 
 option(PMUX_STATIC "Build a fully static pmux executable" OFF)
 option(PMUX_STRIP "Strip the pmux executable at link time" OFF)

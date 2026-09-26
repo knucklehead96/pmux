@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Debug build and full test suite
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ pkg-config libvterm-dev tmux python3-pexpect
+
+      - name: Configure
+        run: cmake -S . -B build-dev -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=-Werror
+
+      - name: Build
+        run: cmake --build build-dev -j "$(nproc)"
+
+      - name: Test
+        run: PMUX_BIN="$PWD/build-dev/pmux" tests/run.sh
+
+  release-binaries:
+    name: Release binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ pkg-config libvterm-dev tmux python3-pexpect file
+
+      - name: Build release binaries
+        run: scripts/release.sh
+
+      - name: Test the dynamic binary
+        run: |
+          bin=$(ls dist/pmux-*-linux-x86_64)
+          PMUX_FAST=1 PMUX_BIN="$PWD/$bin" tests/run.sh
+
+      - name: Test the static binary
+        run: |
+          bin=$(ls dist/pmux-*-linux-x86_64-static)
+          PMUX_FAST=1 PMUX_BIN="$PWD/$bin" tests/run.sh
