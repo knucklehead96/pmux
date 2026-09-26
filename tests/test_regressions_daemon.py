@@ -17,6 +17,7 @@
 """
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -639,7 +640,15 @@ class DaemonHousekeeping(PmuxTestCase):
             conn.sock.sendall(struct.pack("<IB", 1, LIST) * requests)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        time.sleep(0.5)
+        # Read nothing until the daemon hangs up: a reader racing the daemon's producer could keep
+        # its queue under the limit on a slow machine.  POLLHUP is reported with data still unread.
+        poller = select.poll()
+        poller.register(conn.sock, 0)
+        deadline = time.monotonic() + 6 * TIMEOUT
+        hup = False
+        while not hup and time.monotonic() < deadline:
+            hup = any(ev & (select.POLLHUP | select.POLLERR) for _, ev in poller.poll(100))
+        self.assertTrue(hup, "daemon kept a client that does not read")
         received, eof = 0, False
         conn.sock.settimeout(5)
         try:
