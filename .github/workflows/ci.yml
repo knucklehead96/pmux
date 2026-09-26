@@ -31,8 +31,15 @@ jobs:
         run: PMUX_BIN="$PWD/build-dev/pmux" tests/run.sh
 
   release-binaries:
-    name: Release binaries
-    runs-on: ubuntu-24.04
+    name: Release binaries (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,10 +54,10 @@ jobs:
 
       - name: Test the dynamic binary
         run: |
-          bin=$(ls dist/pmux-*-linux-x86_64)
+          bin=$(ls dist/pmux-*-linux-${{ matrix.arch }})
           PMUX_FAST=1 PMUX_BIN="$PWD/$bin" tests/run.sh
 
       - name: Test the static binary
         run: |
-          bin=$(ls dist/pmux-*-linux-x86_64-static)
+          bin=$(ls dist/pmux-*-linux-${{ matrix.arch }}-static)
           PMUX_FAST=1 PMUX_BIN="$PWD/$bin" tests/run.sh

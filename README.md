@@ -45,13 +45,15 @@ sh install.sh
 
 ### Prebuilt binaries
 
-Every [release](https://github.com/knucklehead96/pmux/releases) ships two x86-64 Linux binaries:
+Every [release](https://github.com/knucklehead96/pmux/releases) ships Linux binaries for x86-64 and, from the release after 0.1.0 on, for aarch64 (`<arch>` is `x86_64` or `aarch64`):
 
 | File | |
 |---|---|
-| `pmux-<version>-linux-x86_64-static` | Fully static. Runs on any x86-64 Linux with no libraries installed. |
-| `pmux-<version>-linux-x86_64` | Dynamically linked. Needs `libvterm0` and a glibc / libstdc++ at least as new as Ubuntu 24.04's. |
-| `SHA256SUMS` | Checksums of both. |
+| `pmux-<version>-linux-<arch>-static` | Fully static. Runs on any Linux of that architecture with no libraries installed. |
+| `pmux-<version>-linux-<arch>` | Dynamically linked. Needs `libvterm0` and a glibc / libstdc++ at least as new as Ubuntu 24.04's. |
+| `SHA256SUMS` | Checksums of all of them. |
+
+To install one by hand:
 
 ```sh
 mkdir -p ~/.local/bin

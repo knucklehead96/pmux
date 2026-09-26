@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `install.sh` one-line installer:
   `curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | sh`.
+- aarch64 release binaries (`pmux-<version>-linux-aarch64` and `-static`).
 
 ## [0.1.0] - 2026-09-26
 

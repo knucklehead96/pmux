@@ -1,17 +1,43 @@
 name: Release
 
+# A pushed v* tag builds x86_64 and aarch64 binaries and creates the release.
+#
+# To add missing assets to an EXISTING release (e.g. aarch64 binaries for a
+# release that predates them), run this workflow manually from the Actions tab
+# with the tag as input. It checks out that tag, builds it on both
+# architectures and uploads everything with `gh release upload --clobber`,
+# replacing SHA256SUMS with one covering all binaries. No re-tagging needed.
+
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and upload assets for (e.g. v0.1.0)
+        required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
-  release:
-    runs-on: ubuntu-24.04
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Install dependencies
         run: |
@@ -22,10 +48,10 @@ jobs:
       - name: Build release binaries
         run: scripts/release.sh
 
-      - name: Check the version matches the tag
+      - name: Check the version and architecture
         run: |
-          want="pmux ${GITHUB_REF_NAME#v}"
-          for bin in dist/pmux-*-linux-x86_64 dist/pmux-*-linux-x86_64-static; do
+          want="pmux ${TAG#v}"
+          for bin in dist/pmux-*-linux-${{ matrix.arch }} dist/pmux-*-linux-${{ matrix.arch }}-static; do
             got=$("$bin" --version)
             if [ "$got" != "$want" ]; then
               echo "::error::$bin --version prints '$got', expected '$want'"
@@ -35,12 +61,40 @@ jobs:
 
       - name: Test the static binary
         run: |
-          bin=$(ls dist/pmux-*-linux-x86_64-static)
+          bin=$(ls dist/pmux-*-linux-${{ matrix.arch }}-static)
           PMUX_FAST=1 PMUX_BIN="$PWD/$bin" tests/run.sh
 
-      - name: Extract release notes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/pmux-*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          cd dist
+          chmod 755 pmux-*
+          sha256sum pmux-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Extract release notes
+        if: github.event_name == 'push'
+        run: |
+          version="${TAG#v}"
           awk -v v="$version" '
             /^## \[/ { if (found) exit; if (index($0, "## [" v "]") == 1) { found = 1; next } }
             found && /^\[[^]]+\]: / { exit }
@@ -53,8 +107,17 @@ jobs:
           cat notes.md
 
       - name: Create GitHub release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/pmux-* dist/SHA256SUMS \
-            --title "pmux $GITHUB_REF_NAME" --notes-file notes.md
+          gh release create "$TAG" dist/pmux-* dist/SHA256SUMS \
+            --title "pmux $TAG" --notes-file notes.md
+
+      - name: Upload assets to the existing release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" > /dev/null
+          gh release upload "$TAG" dist/pmux-* dist/SHA256SUMS --clobber
