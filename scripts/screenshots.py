@@ -8,7 +8,7 @@ private tmux server, drives it into a few states, converts each
 with headless Chromium.
 
     python3 scripts/screenshots.py [--pmux build/pmux] [--out docs/screenshots]
-                                   [--chrome PATH] [--no-idle] [--keep-html]
+                                   [--chrome PATH] [--keep-html]
 
 Output: list-dark.png, list-light.png, filter.png, new-dialog.png,
 kill-confirm.png.  Requires tmux, perl (the demo processes use it to set a
@@ -58,7 +58,8 @@ DEMO = [
     ("tests", "web", ["claude"]),
     ("docs-preview", "web", ["mkdocs", "serve"]),
 ]
-KILLED = "docs-preview"
+KILLED = "docs-preview"   # ends by SIGHUP: shows the signaled state
+KILL_PROMPT = "api-server"  # the kill screenshot's "press ctrl+x again" target
 
 # ---------------------------------------------------------------------------
 # themes for the HTML rendering
@@ -375,6 +376,15 @@ class Env:
                 raise RuntimeError("timed out waiting for %s; screen:\n%s" % (what, "\n".join(lines)))
             time.sleep(0.1)
 
+    def wait_gone(self, session, what, timeout=10):
+        """Waits for the session to end (its pmux exited)."""
+        end = time.time() + timeout
+        while subprocess.run(["tmux", "-L", self.tmux_sock, "-f", "/dev/null", "has-session", "-t", session],
+                             env=dict(self.env, TMUX_TMPDIR=self.root), capture_output=True).returncode == 0:
+            if time.time() > end:
+                raise RuntimeError("timed out waiting for %s" % what)
+            time.sleep(0.1)
+
     def cleanup(self):
         if self.tmux_started:
             subprocess.run(["tmux", "-L", self.tmux_sock, "-f", "/dev/null", "kill-server"],
@@ -444,8 +454,6 @@ def main():
     ap.add_argument("--out", default=os.path.join(REPO, "docs", "screenshots"))
     ap.add_argument("--chrome", default=os.environ.get("CHROME", DEFAULT_CHROME))
     ap.add_argument("--scale", type=float, default=2, help="device scale factor (default 2)")
-    ap.add_argument("--no-idle", action="store_true",
-                    help="don't wait the 5 s for the idle state (scratch may show as running)")
     ap.add_argument("--keep-html", action="store_true", help="also write the .html pages to --out")
     a = ap.parse_args()
 
@@ -467,11 +475,11 @@ def main():
             env.run("-n", name, "-d", "--", *argv, cwd=d)
             time.sleep(0.05)   # distinct creation order
         wait_states(env, {"migrate-db": "exited", "tests": "running"}, 10)
-        env.run("-k", KILLED)
-        want = {"migrate-db": "exited:1", KILLED: "signaled"}
-        if not a.no_idle:
-            want["scratch"] = "idle"
-        wait_states(env, want, 15)
+        # `pmux -k` removes the process; signal it directly to keep a signaled row.
+        pid = int(next(l.split("\t")[2] for l in env.run("-l").splitlines()
+                       if l.split("\t")[0] == KILLED))
+        os.killpg(pid, signal.SIGHUP)
+        wait_states(env, {"migrate-db": "exited:1", KILLED: "signaled"}, 15)
         time.sleep(0.5)
 
         shots = []   # (file, theme, lines)
@@ -485,7 +493,7 @@ def main():
         env.wait(s, contains("› build"), "the filter")
         shots.append(("filter.png", "dark", env.capture(s)))
         env.keys(s, "Escape")
-        env.wait(s, contains(FOOTER_LIST + "  ^n new"), "the filter to clear")
+        env.wait(s, contains(FOOTER_LIST + "  ctrl+n new"), "the filter to clear")
         env.keys(s, *["Up"] * len(DEMO))   # back to the first row (FTXUI ignores tmux's Home, ESC [ 1 ~)
         time.sleep(0.5)
 
@@ -498,9 +506,15 @@ def main():
         env.wait(s, lambda ls: not contains(DIALOG_HINT)(ls), "the dialog to close")
 
         env.keys(s, "C-x")
-        env.wait(s, contains("y yes"), "the kill confirmation")
+        env.wait(s, contains("press ctrl+x again to kill " + KILL_PROMPT), "the kill prompt")
         shots.append(("kill-confirm.png", "dark", env.capture(s)))
-        env.keys(s, "n")
+        env.keys(s, "Escape")   # any other key cancels
+        env.wait(s, contains(FOOTER_LIST), "the kill prompt to go away")
+
+        env.keys(s, "C-c")
+        env.wait(s, contains("press ctrl+c again to quit"), "the quit prompt")
+        env.keys(s, "C-c")
+        env.wait_gone(s, "the list to quit")
 
         env.config("light")
         s = "light"
