@@ -32,6 +32,9 @@ namespace pmux {
 //               daemon -> client: str color resets  (reply, or attached elsewhere)
 //   EXITED      i32 wait status, str color resets
 //   ERROR       str message
+//   STOP        u8 force                           -> OK just before the daemon exits | ERROR
+//               (force = 0: ERROR if any process is running; force = 1: SIGHUP every running
+//               process, SIGKILL after 3 s, then exit)
 enum class MsgType : std::uint8_t {
   List = 1,
   ListReply,
@@ -49,6 +52,7 @@ enum class MsgType : std::uint8_t {
   Error,
   Ok,
   View,
+  Stop,
 };
 
 struct Frame {

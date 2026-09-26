@@ -24,6 +24,22 @@ cmake -S . -B build && cmake --build build -j
 cmake --install build --prefix ~/.local      # installs ~/.local/bin/pmux
 ```
 
+## Release binaries
+
+```sh
+scripts/release.sh
+```
+
+builds two Release variants (in `build-release-dynamic/` and `build-release-static/`) and writes to `dist/`:
+
+| File | |
+|---|---|
+| `pmux-<version>-linux-<arch>` | Dynamically linked (libvterm, libstdc++, glibc), stripped. |
+| `pmux-<version>-linux-<arch>-static` | Fully static (libvterm, libstdc++ and glibc linked in), stripped. Runs on any x86-64 Linux with no libraries installed. |
+| `SHA256SUMS` | Checksums of both. |
+
+The version comes from `project()` in CMakeLists.txt; `pmux --version` prints it. The script uses two CMake options, also usable on their own: `-DPMUX_STATIC=ON` (static link; needs `libvterm.a`, shipped by `libvterm-dev`) and `-DPMUX_STRIP=ON` (strip at link time with `-s`). pmux does not use NSS lookups (users, hosts), so the static glibc build has no NSS caveats.
+
 ## Usage
 
 | Command | |
@@ -33,7 +49,9 @@ cmake --install build --prefix ~/.local      # installs ~/.local/bin/pmux
 | `pmux -l` | Print the processes as tab-separated `NAME STATE PID DIR COMMAND` lines. |
 | `pmux -a <name>` | Attach to a process. |
 | `pmux -k <name>` | Kill a process (`SIGHUP`, then `SIGKILL` after 3 s) and remove it from the list once it has exited. A process that has already exited is just removed. |
+| `pmux --stop [-f]` | Stop the daemon. Refuses (exit 1, listing them) while processes are running; `-f` / `--force` kills them first (`SIGHUP`, then `SIGKILL` after 3 s). |
 | `pmux --daemon` | Run the daemon in the foreground, for debugging. |
+| `pmux -V` / `--version` | Print the version. |
 
 ### Keys in the list
 

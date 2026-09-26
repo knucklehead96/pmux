@@ -63,8 +63,16 @@ class DaemonTests(PmuxTestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn(b"usage", (p.stdout + p.stderr).lower())
 
+    def test_version(self):
+        for flag in ("--version", "-V"):
+            with self.subTest(flag=flag):
+                p = self.px.run(flag)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertRegex(p.stdout, rb"^pmux \d+\.\d+\.\d+\n$")
+        self.assertFalse(os.path.exists(self.px.sock_dir), "--version must not spawn the daemon")
+
     def test_bad_args(self):
-        for args in (["--bogus"], ["-Q"], ["-a"], ["-k"]):
+        for args in (["--bogus"], ["-Q"], ["-a"], ["-k"], ["-f"], ["-l", "--force"], ["--stop", "-l"]):
             with self.subTest(args=args):
                 p = self.px.run(*args)
                 self.assertEqual(p.returncode, 2, "pmux %s: stderr=%r" % (" ".join(args), p.stderr))
@@ -187,6 +195,64 @@ class KillTests(PmuxTestCase):
                 p = self.px.run(flag, "nope")
                 self.assertEqual(p.returncode, 1, "pmux %s nope: stderr=%r" % (flag, p.stderr))
         self.assertEqual([r["name"] for r in self.px.list()], ["real"])
+
+
+class StopTests(PmuxTestCase):
+    def assertDaemonGone(self, pid):
+        # --stop returns only once the daemon has exited: no polling here.
+        self.assertFalse(pid_alive(pid), "daemon still alive after --stop returned")
+        self.assertFalse(os.path.exists(self.px.sock), "socket left behind")
+        self.assertFalse(os.path.exists(self.px.pidfile), "pidfile left behind")
+
+    def test_stop_without_daemon(self):
+        p = self.px.run("--stop")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr, b"pmux: no daemon running\n")
+        self.assertFalse(os.path.exists(self.px.sock_dir), "--stop must not spawn the daemon")
+
+    def test_stop_idle_daemon(self):
+        self.assertEqual(self.px.run("-n", "ex", "-d", "--", "sh", "-c", "exit 3").returncode, 0)
+        self.px.wait_state("ex", lambda s: s != "running")
+        pid = self.px.daemon_pid()
+        p = self.px.run("--stop")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual((p.stdout, p.stderr), (b"", b""))
+        self.assertDaemonGone(pid)
+
+    def test_stop_refuses_running_processes(self):
+        for name in ("one", "two"):
+            self.assertEqual(self.px.run("-n", name, "-d", "--", "sleep", "600").returncode, 0)
+        self.assertEqual(self.px.run("-n", "ex", "-d", "--", "sh", "-c", "exit 0").returncode, 0)
+        self.px.wait_state("ex", lambda s: s != "running")
+        pid = self.px.daemon_pid()
+        p = self.px.run("--stop")
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertEqual(p.stderr, b"pmux: 2 process(es) still running: one, two\n"
+                                   b"use pmux --stop --force to kill them and stop the daemon\n")
+        self.assertTrue(pid_alive(pid), "daemon must be left alone")
+        self.assertEqual(self.px.daemon_pid(), pid)
+        self.assertEqual([(r["name"], r["state"]) for r in self.px.list()],
+                         [("one", "running"), ("two", "running"), ("ex", "exited:0")])
+
+    def test_stop_force_kills_and_stops(self):
+        self.assertEqual(self.px.run("-n", "plain", "-d", "--", "sleep", "600").returncode, 0)
+        log = self.px.path("sig.log")
+        self.px.create_probe("stubborn", "signals", log)
+        pids = [int(self.px.entry(n)["pid"]) for n in ("plain", "stubborn")]
+        daemon = self.px.daemon_pid()
+        t0 = time.monotonic()
+        p = self.px.run("--stop", "-f", timeout=15)
+        elapsed = time.monotonic() - t0
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual((p.stdout, p.stderr), (b"", b""))
+        self.assertIn(b"HUP", read_file(log).split(), "SIGHUP must reach the process group first")
+        self.assertGreaterEqual(elapsed, 2.5, "SIGKILL came too early (%.2fs)" % elapsed)
+        self.assertLess(elapsed, 8, "--stop --force took %.2fs" % elapsed)
+        for pid in pids:
+            self.assertFalse(pid_alive(pid), "process %d survived --stop --force" % pid)
+        self.assertDaemonGone(daemon)
+        # The next command starts a fresh, empty daemon.
+        self.assertEqual(self.px.list(), [])
 
 
 if __name__ == "__main__":

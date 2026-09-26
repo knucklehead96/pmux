@@ -84,11 +84,12 @@ UniqueFd try_connect(std::string& error, Failure& failure) {
 
 }  // namespace
 
-UniqueFd connect_daemon(std::string* error) {
+UniqueFd connect_daemon(std::string* error, bool* not_running) {
   std::string message;
   Failure failure;
   UniqueFd fd = try_connect(message, failure);
   if (!fd && error) *error = std::move(message);
+  if (not_running) *not_running = failure == Failure::NotRunning;
   return fd;
 }
 

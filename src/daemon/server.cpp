@@ -153,6 +153,7 @@ int Server::run() {
     }
     run_timers();
     remove_finished();
+    if (stopping_) finish_stop();
     close_dead_clients();
   }
   return 0;
@@ -223,6 +224,7 @@ void Server::handle_frame(Client& c, const Frame& frame) {
     case MsgType::Input: do_input(c, frame); break;
     case MsgType::Kill: do_kill(c, frame); break;
     case MsgType::Remove: do_remove(c, frame); break;
+    case MsgType::Stop: do_stop(c, frame); break;
     default: send(c, error_frame("unsupported request")); break;
   }
 }
@@ -251,6 +253,7 @@ void Server::do_list(Client& c) {
 }
 
 void Server::do_new(Client& c, const Frame& frame) {
+  if (stopping_) return send(c, error_frame("daemon is stopping"));
   PayloadReader r(frame.payload);
   SessionSpec spec;
   spec.name = r.str();
@@ -415,6 +418,37 @@ void Server::do_remove(Client& c, const Frame& frame) {
   if (!p->session->exited()) return send(c, error_frame(p->session->name() + " is still running"));
   procs_.erase(id);
   send(c, ok_frame());
+}
+
+void Server::do_stop(Client& c, const Frame& frame) {
+  PayloadReader r(frame.payload);
+  const bool force = r.u8() != 0;
+  if (!r.ok()) return send(c, error_frame("malformed request"));
+  std::vector<Proc*> running;
+  for (auto& [id, p] : procs_)
+    if (!p.session->exited()) running.push_back(&p);
+  if (!running.empty() && !force && !stopping_) {
+    std::string names;
+    for (const Proc* p : running) names += (names.empty() ? "" : ", ") + p->session->name();
+    return send(c, error_frame(std::to_string(running.size()) + " process(es) still running: " + names +
+                               "\nuse pmux --stop --force to kill them and stop the daemon"));
+  }
+  stopping_ = true;
+  stop_waiters_.push_back(c.id);
+  for (Proc* p : running) {
+    if (p->kill_deadline || p->session->reaped()) continue;
+    p->session->hangup();
+    p->kill_deadline = Clock::now() + kKillGrace;
+  }
+}
+
+// Once every process has exited, answers the STOP requests and ends the loop.
+void Server::finish_stop() {
+  for (const auto& [id, p] : procs_)
+    if (!p.session->exited()) return;
+  for (std::uint32_t cid : std::exchange(stop_waiters_, {}))
+    if (Client* c = find_client(cid)) send(*c, ok_frame());
+  running_ = false;
 }
 
 void Server::send(Client& c, const Frame& frame) {

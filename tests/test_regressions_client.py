@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import time
 import unittest
@@ -125,6 +126,45 @@ class DaemonGone(TuiCase):
         self.assertIn("pmux: lost connection to daemon", t.history(), t.describe())
         self.assertEqual(t.modes(), ("0", "0"), "alt screen / mouse reporting left on")
 
+    def test_tui_exits_cleanly_on_stop(self):
+        self.new_exited("done", "exit 0")
+        t = self.start_list("done")
+        self.assertEqual(t.modes(), ("1", "1"))
+        p = self.px.run("--stop")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        t.wait_dead()
+        self.assertEqual(t.dead_status(), 1, t.describe())
+        self.assertIn("pmux: lost connection to daemon", t.history(), t.describe())
+        self.assertEqual(t.modes(), ("0", "0"), "alt screen / mouse reporting left on")
+
+    def test_attached_client_and_tui_exit_cleanly_on_force_stop(self):
+        script = self.px.path("alt.script")
+        with open(script, "wb") as f:
+            f.write(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[HALT-SCREEN")
+        self.px.create_probe("alt", "draw", script, cwd=self.api)
+        lst = self.start_list("alt")
+        att = self.tui(args=("-a", "alt"))
+        att.wait_for("ALT-SCREEN")
+        self.assertEqual(att.modes(), ("1", "1"))
+        p = self.px.run("--stop", "--force", timeout=15)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for t in (att, lst):
+            t.wait_dead()
+            self.assertEqual(t.modes(), ("0", "0"), "alt screen / mouse reporting left on\n" + t.describe())
+        self.assertIn("[alt killed by signal 1]", att.history(), att.describe())
+        self.assertEqual(att.dead_status(), 0, att.describe())
+        self.assertEqual(lst.dead_status(), 1, lst.describe())
+        self.assertIn("pmux: lost connection to daemon", lst.history(), lst.describe())
+
+
+def dynamically_linked(path):
+    """True if the ELF64 executable has a PT_INTERP header (LD_PRELOAD applies)."""
+    with open(path, "rb") as f:
+        data = f.read(1 << 16)
+    phoff, = struct.unpack_from("<Q", data, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    return any(struct.unpack_from("<I", data, phoff + i * phentsize)[0] == 3 for i in range(phnum))
+
 
 # ---------------------------------------------------------------------------
 # 3. socket directory and peer credential checks
@@ -151,6 +191,8 @@ class SocketSecurity(PmuxTestCase):
     def test_refuses_daemon_owned_by_another_uid(self):
         # A cross-uid daemon needs root or newuidmap; instead an LD_PRELOAD
         # shim makes SO_PEERCRED report a different uid.
+        if not dynamically_linked(PMUX_BIN):
+            self.skipTest("static PMUX_BIN: the LD_PRELOAD shim cannot apply")
         cc = shutil.which("cc") or shutil.which("gcc")
         if not cc:
             self.skipTest("no C compiler for the SO_PEERCRED shim")

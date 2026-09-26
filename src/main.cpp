@@ -4,12 +4,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "client/attach.hpp"
@@ -25,6 +29,7 @@ namespace {
 
 constexpr int kRequestTimeoutMs = 5000;
 constexpr int kKillTimeoutMs = 10000;
+constexpr auto kStopExitWait = std::chrono::seconds(5);
 
 constexpr const char* kUsage =
     "usage: pmux                               open the process list\n"
@@ -33,15 +38,19 @@ constexpr const char* kUsage =
     "       pmux -l                            list processes\n"
     "       pmux -a <name>                     attach to a process\n"
     "       pmux -k <name>                     kill and remove a process\n"
+    "       pmux --stop [-f | --force]         stop the daemon (--force: kill running\n"
+    "                                          processes first)\n"
     "       pmux --daemon                      run the daemon in the foreground\n"
-    "       pmux -h | --help                   show this help\n";
+    "       pmux -h | --help                   show this help\n"
+    "       pmux -V | --version                print the version\n";
 
-enum class Mode { Tui, New, List, Attach, Kill, Daemon, Help };
+enum class Mode { Tui, New, List, Attach, Kill, Stop, Daemon, Help, Version };
 
 struct Options {
   Mode mode = Mode::Tui;
   std::string name;
   bool detached = false;
+  bool force = false;
   std::vector<std::string> cmd;
 };
 
@@ -71,15 +80,22 @@ std::optional<Options> parse_args(int argc, char** argv) {
       o.detached = true;
     } else if (arg == "-l") {
       if (!set_mode(Mode::List)) return std::nullopt;
+    } else if (arg == "--stop") {
+      if (!set_mode(Mode::Stop)) return std::nullopt;
+    } else if (arg == "-f" || arg == "--force") {
+      o.force = true;
     } else if (arg == "--daemon") {
       if (!set_mode(Mode::Daemon)) return std::nullopt;
     } else if (arg == "-h" || arg == "--help") {
       if (!set_mode(Mode::Help)) return std::nullopt;
+    } else if (arg == "-V" || arg == "--version") {
+      if (!set_mode(Mode::Version)) return std::nullopt;
     } else {
       return std::nullopt;
     }
   }
   if (o.detached && o.mode != Mode::New) return std::nullopt;
+  if (o.force && o.mode != Mode::Stop) return std::nullopt;
   return o;
 }
 
@@ -227,6 +243,51 @@ int cmd_kill(const Options& o) {
   return 0;
 }
 
+// The daemon's pid from its pidfile; 0 if unknown.
+pid_t daemon_pid() {
+  std::ifstream file(pid_path());
+  long pid = 0;
+  return file >> pid && pid > 0 ? static_cast<pid_t>(pid) : 0;
+}
+
+// Gone, or a zombie its parent has not waited for yet.
+bool process_gone(pid_t pid) {
+  if (kill(pid, 0) != 0) return errno == ESRCH;
+  std::ifstream stat("/proc/" + std::to_string(pid) + "/stat");
+  std::string line;
+  std::getline(stat, line);
+  const auto paren = line.rfind(')');
+  return paren != std::string::npos && line.compare(paren, 3, ") Z") == 0;
+}
+
+int cmd_stop(const Options& o) {
+  std::string error;
+  bool not_running = false;
+  UniqueFd fd = connect_daemon(&error, &not_running);
+  if (!fd && not_running) {
+    std::fprintf(stderr, "pmux: no daemon running\n");
+    return 0;
+  }
+  if (!fd) {
+    std::fprintf(stderr, "pmux: %s\n", error.c_str());
+    return 1;
+  }
+  const pid_t pid = daemon_pid();
+  auto reply = request(fd.get(), make_frame(MsgType::Stop, PayloadWriter().u8(o.force ? 1 : 0).take()),
+                       kKillTimeoutMs);
+  if (!reply || reply->type != MsgType::Ok) return report_failure(reply);
+  // OK comes just before the daemon exits; wait until it has.
+  const auto deadline = std::chrono::steady_clock::now() + kStopExitWait;
+  while (pid && !process_gone(pid)) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      std::fprintf(stderr, "pmux: daemon (pid %d) did not exit\n", static_cast<int>(pid));
+      return 1;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return 0;
+}
+
 }  // namespace
 }  // namespace pmux
 
@@ -241,15 +302,19 @@ int main(int argc, char** argv) {
     return 2;
   }
   Config config;
-  if (options->mode != Mode::Daemon && options->mode != Mode::Help) config = load_config();
+  if (options->mode != Mode::Daemon && options->mode != Mode::Help &&
+      options->mode != Mode::Version && options->mode != Mode::Stop)
+    config = load_config();
   switch (options->mode) {
     case Mode::Tui: return run_tui(config, current_dir());
     case Mode::New: return cmd_new(*options, config);
     case Mode::List: return cmd_list();
     case Mode::Attach: return cmd_attach(*options, config);
     case Mode::Kill: return cmd_kill(*options);
+    case Mode::Stop: return cmd_stop(*options);
     case Mode::Daemon: return run_daemon();
     case Mode::Help: std::fputs(kUsage, stdout); return 0;
+    case Mode::Version: std::puts("pmux " PMUX_VERSION); return 0;
   }
   return 2;
 }

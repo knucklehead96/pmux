@@ -68,6 +68,8 @@ class Server {
   void do_input(Client& c, const Frame& frame);
   void do_kill(Client& c, const Frame& frame);
   void do_remove(Client& c, const Frame& frame);
+  void do_stop(Client& c, const Frame& frame);
+  void finish_stop();
 
   void send(Client& c, const Frame& frame);
   void flush(Client& c);
@@ -95,6 +97,8 @@ class Server {
   UniqueFd epoll_fd_;
   UniqueFd signal_fd_;
   bool running_ = true;
+  bool stopping_ = false;  // STOP accepted: exit once every process has exited
+  std::vector<std::uint32_t> stop_waiters_;
   std::uint32_t next_client_id_ = 1;
   std::uint32_t next_session_id_ = 1;
   std::map<std::uint32_t, Client> clients_;
