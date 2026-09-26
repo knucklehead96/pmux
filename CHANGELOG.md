@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leave the alternate screen or erase the shell's scrollback.
 - The app's own alternate screen switches are emulated: quitting `less` or `vim`
   inside pmux repaints the app's normal screen instead of leaving pmux's.
+- Reattaching restores the app's scroll margins, origin mode and insert mode.
 - `[detached from NAME]` and the exit messages of `pmux -n` / `pmux -a` are
   printed on the shell's screen, on their own line.
 

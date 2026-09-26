@@ -83,7 +83,10 @@ Files:
   detach / quit (`-n`, `-a`, TUI attach and exited view, quit without
   attaching), `[detached ...]` on its own line, the app's alternate screen
   switches emulated (incl. other parameters in the same CSI, split across
-  reads, an unmatched exit), RIS replaced by a soft reset, `CSI 3 J` removed,
+  reads, an unmatched exit, cut parameters), RIS replaced by a soft reset
+  that does not rely on DECSTR (tmux ignores it), `CSI 3 J` removed, a
+  sequence split across an attach, scroll margins kept across scroll mode
+  and reattach, a >1 MiB view snapshot left intact,
   DECSTR / combined sequences keeping pmux's mouse, output resuming at a
   sequence boundary after a snapshot, the outer mouse modes following the
   app, the wheel (scroll mode, cursor keys on the app's alternate screen,

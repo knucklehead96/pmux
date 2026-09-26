@@ -41,6 +41,15 @@ class ModeTracker {
   std::string set_kitty(bool alt) const;
   // OSC 104;<idx> / 110 / 111 / 112 for colors the app set and has not reset.
   std::string color_resets() const;
+  // Scroll margins (DECSTBM), then origin mode (DECOM), for a `rows`-row screen; `origin_top`
+  // receives the row CUP is relative to afterwards. Plus insert mode (IRM).
+  std::string restore_margins(int rows, int& origin_top) const;
+  bool origin() const { return origin_; }
+  // Terminals reset the margins on resize.
+  void reset_margins() {
+    margin_top_ = 1;
+    margin_bottom_ = 0;
+  }
   // color_resets() of the colors a RIS reset since the last call.
   std::string take_ris_color_resets() { return std::exchange(ris_color_resets_, {}); }
   // The app's mouse modes and cursor-key mode as STATE flags (without the alternate screen).
@@ -73,6 +82,9 @@ class ModeTracker {
   bool cursor_keys_ = false;  // DECCKM (?1)
   bool autowrap_ = true;      // DECAWM (?7)
   bool cursor_visible_ = true;
+  bool origin_ = false;  // DECOM (?6)
+  bool insert_ = false;  // IRM (CSI 4 h)
+  int margin_top_ = 1, margin_bottom_ = 0;  // DECSTBM, 1-based; bottom 0 = the last row
   bool keypad_ = false;  // ESC = / ESC >
   bool focus_ = false;   // ?1004
   bool paste_ = false;   // ?2004
@@ -164,6 +176,7 @@ class OutputFilter {
   std::string params_;  // its parameter bytes (at most kMaxParams)
   std::string c0_;      // C0 controls executed inside it
   bool plain_ = true;   // no intermediates or other odd bytes: may be rewritten
+  bool capped_ = false; // parameter bytes past kMaxParams were dropped
   bool decstr_ = false;    // the intermediate is '!' (CSI ! p)
   bool released_ = false;  // take_held() gave the current sequence up
   int utf8_left_ = 0;      // continuation bytes the current UTF-8 character still needs

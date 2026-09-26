@@ -18,8 +18,11 @@ constexpr std::size_t kMaxParams = 256;
 constexpr std::size_t kMaxOsc = 1 << 16;
 constexpr std::size_t kMaxKittyStack = 64;
 constexpr std::size_t kSnapshotReserve = 1 << 16;
-// Turns off every mode a snapshot may turn on that DECSTR leaves alone (DECSTR resets the cursor
-// keys, keypad, cursor visibility, autowrap, origin mode, insert mode and margins).
+// Soft reset. DECSTR alone is not enough: some terminals ignore it (tmux 3.4), so what pmux
+// relies on it for is reset explicitly too.
+constexpr std::string_view kSoftReset =
+    "\x1b[!p\x1b[?25h\x1b[?7h\x1b[4l\x1b[?6l\x1b[r\x1b(B\x0f\x1b[0m\x1b[?1l\x1b>";
+// Turns off every mode a snapshot may turn on that kSoftReset leaves alone.
 constexpr std::string_view kModeOffs =
     "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l"
     "\x1b[?1004l\x1b[?2004l\x1b[>4m\x1b[0 q\x1b[?1l\x1b>";
@@ -307,6 +310,9 @@ void ModeTracker::reset() {
   cursor_keys_ = false;
   autowrap_ = true;
   cursor_visible_ = true;
+  origin_ = false;
+  insert_ = false;
+  reset_margins();
   keypad_ = false;
   focus_ = false;
   paste_ = false;
@@ -459,6 +465,7 @@ long param(const std::vector<long>& p, std::size_t i, long def) {
 void ModeTracker::set_private_mode(int mode, bool on) {
   switch (mode) {
     case 1: cursor_keys_ = on; break;
+    case 6: origin_ = on; break;
     case 7: autowrap_ = on; break;
     case 25: cursor_visible_ = on; break;
     case 47:
@@ -499,6 +506,20 @@ void ModeTracker::dispatch_csi(char final) {
     keypad_ = false;
     cursor_visible_ = true;
     autowrap_ = true;
+    origin_ = false;
+    insert_ = false;
+    reset_margins();
+  } else if ((final == 'h' || final == 'l') && prefix_ == 0 && intermediates_.empty()) {
+    for (long m : p)
+      if (m == 4) insert_ = final == 'h';
+  } else if (final == 'r' && prefix_ == 0 && intermediates_.empty()) {
+    // DECSTBM; an empty region (top >= bottom) is ignored, as xterm does.
+    const long top = std::max(param(p, 0, 1), 1L);
+    const long bottom = param(p, 1, 0);
+    if (bottom == 0 || top < bottom) {
+      margin_top_ = int(std::min(top, 100000L));
+      margin_bottom_ = int(std::min(bottom, 100000L));
+    }
   } else if ((final == 'm' || final == 'n') && prefix_ == '>' && intermediates_.empty()) {
     // xterm modifyOtherKeys: CSI > 4 ; n m sets it, CSI > 4 m resets it, CSI > 4 n disables it.
     if (param(p, 0, -1) == 4) modify_other_keys_ = final == 'm' ? int(std::clamp(param(p, 1, 0), 0L, 3L)) : 0;
@@ -619,6 +640,23 @@ std::string ModeTracker::restore_kitty(bool alt) const {
     append_int(out, long(stack.back()));
     out += 'u';
   }
+  return out;
+}
+
+std::string ModeTracker::restore_margins(int rows, int& origin_top) const {
+  std::string out;
+  origin_top = 0;
+  const int bottom = margin_bottom_ == 0 ? rows : std::min(margin_bottom_, rows);
+  if (margin_top_ < bottom && (margin_top_ > 1 || bottom < rows)) {
+    out += "\x1b[";
+    append_int(out, margin_top_);
+    out += ';';
+    append_int(out, bottom);
+    out += 'r';
+    if (origin_) origin_top = margin_top_ - 1;
+  }
+  if (origin_) out += "\x1b[?6h";
+  if (insert_) out += "\x1b[4h";
   return out;
 }
 
@@ -928,10 +966,10 @@ std::string OutputFilter::take_held() {
 }
 
 void OutputFilter::resync() {
-  if (at_ground()) return;
+  // A held sequence reached neither the terminal nor (buffered by SgrRewriter) libvterm: it
+  // still goes out whole.
+  if (at_ground() || !held_.empty()) return;
   skip_ = true;
-  if (!held_.empty()) released_ = true;  // part of what the snapshot already shows
-  held_.clear();
 }
 
 OutputFilter::Event OutputFilter::finish_private(char final, std::string& out) {
@@ -950,7 +988,8 @@ OutputFilter::Event OutputFilter::finish_private(char final, std::string& out) {
       (kept += kept.empty() ? "" : ";") += p;
     }
   }
-  if (!alt) {
+  // A released sequence whose parameters were cut may have named 1049 too: act as if it did.
+  if (!alt && !(released_ && capped_)) {
     release(out);
     return mouse ? Event::Mouse : Event::Mode;
   }
@@ -1009,6 +1048,7 @@ std::size_t OutputFilter::feed_bytes(const char* data, std::size_t len, std::str
   };
   auto add_param = [&](char ch) {
     if (params_.size() < kMaxParams) params_ += ch;
+    else capped_ = true;
   };
   for (std::size_t i = 0; i < len; ++i) {
     const char ch = data[i];
@@ -1034,6 +1074,7 @@ std::size_t OutputFilter::feed_bytes(const char* data, std::size_t len, std::str
           params_.clear();
           c0_.clear();
           plain_ = true;
+          capped_ = false;
           decstr_ = false;
         } else if (cancel) {
           release(out);
@@ -1259,7 +1300,7 @@ void Screen::feed(const char* data, std::size_t len, std::vector<OutputPiece>& o
         save_default_cursor();
         // Instead of RIS: a soft reset of everything the app may have changed, then the (blank)
         // screen from the model.
-        out.back().bytes += "\x1b[!p";
+        out.back().bytes += kSoftReset;
         out.back().bytes += kModeOffs;
         out.back().bytes += "\x1b[<99u";
         out.back().bytes += modes_.take_ris_color_resets();
@@ -1342,6 +1383,7 @@ void Screen::resize(int rows, int cols) {
   }
   rows_ = rows;
   cols_ = cols;
+  modes_.reset_margins();  // as the client's terminal does on resize
   // libvterm does not clamp the scroll region's top on resize: a region starting below the new
   // last row makes the next scroll write out of bounds. Reset it, as xterm and tmux do on resize;
   // if libvterm is inside a string or escape sequence, as soon as it is out of it.
@@ -1423,7 +1465,8 @@ std::string Screen::snapshot(bool fresh) {
   out.reserve(kSnapshotReserve);
   if (!fresh) out += kModeOffs;
   // Soft reset (never RIS), hide the cursor while painting, clear the screen.
-  out += "\x1b[!p\x1b[0m\x1b[H\x1b[2J\x1b[?7h\x1b[?25l";
+  out += kSoftReset;
+  out += "\x1b[H\x1b[2J\x1b[?25l";
   const std::uint64_t top = history_end();
   paint_lines(out, top, rows_, cols_, false);
   append_tail(out, top, rows_, cols_, true, fresh);
@@ -1433,7 +1476,8 @@ std::string Screen::snapshot(bool fresh) {
 std::string Screen::view_snapshot(int rows, int cols) const {
   std::string out;
   out.reserve(kSnapshotReserve);
-  out += "\x1b[!p\x1b[0m\x1b[H\x1b[2J\x1b[?7h\x1b[?25l";
+  out += kSoftReset;
+  out += "\x1b[H\x1b[2J\x1b[?25l";
   const std::uint64_t top = view_top(rows);
   paint_lines(out, top, rows, cols, false);
   append_tail(out, top, rows, cols, false, true);
@@ -1445,8 +1489,11 @@ void Screen::append_tail(std::string& out, std::uint64_t top, int rows, int cols
                          bool fresh) const {
   VTermPos cursor{};
   vterm_state_get_cursorpos(state_, &cursor);
+  // The app's scroll margins and origin mode (then CUP is relative to the top margin).
+  int origin_top = 0;
+  if (interactive) out += modes_.restore_margins(rows, origin_top);
   const auto row = std::int64_t(history_end()) + cursor.row - std::int64_t(top);
-  append_cup(out, int(std::clamp<std::int64_t>(row, 0, rows - 1)), std::clamp(cursor.col, 0, cols - 1));
+  append_cup(out, int(std::clamp<std::int64_t>(row, 0, rows - 1) - origin_top), std::clamp(cursor.col, 0, cols - 1));
   out += modes_.restore_modes(interactive);
   if (interactive) out += fresh ? modes_.restore_kitty(alt_) : modes_.set_kitty(alt_);
   out += modes_.restore_title_and_colors();
@@ -1456,7 +1503,8 @@ void Screen::append_tail(std::string& out, std::uint64_t top, int rows, int cols
 }
 
 std::string Screen::repaint() const {
-  std::string out = "\x1b[0m";
+  // Painted with absolute CUPs: origin mode off meanwhile (the margins stay).
+  std::string out = modes_.origin() ? "\x1b[0m\x1b[?6l" : "\x1b[0m";
   for (int r = 0; r < rows_; ++r) {
     append_cup(out, r, 0);
     out += "\x1b[2K";
@@ -1464,7 +1512,9 @@ std::string Screen::repaint() const {
   }
   VTermPos cursor{};
   vterm_state_get_cursorpos(state_, &cursor);
-  append_cup(out, std::clamp(cursor.row, 0, rows_ - 1), std::clamp(cursor.col, 0, cols_ - 1));
+  int origin_top = 0;
+  if (modes_.origin()) out += modes_.restore_margins(rows_, origin_top);  // with ?6h
+  append_cup(out, std::clamp(cursor.row, 0, rows_ - 1) - origin_top, std::clamp(cursor.col, 0, cols_ - 1));
   const Pen pen = current_pen();
   if (!plain(pen)) append_sgr(out, pen);
   return out;
@@ -1508,9 +1558,10 @@ void Screen::paint_lines(std::string& out, std::uint64_t top, int rows, int cols
 
 std::string Screen::scroll_paint(std::uint64_t top, int rows, int cols) const {
   // No DECSTR: it would reset the terminal's input modes (bracketed paste, and on some
-  // terminals pmux's mouse modes). Only what painting needs: no origin / insert mode, full
-  // margins, ASCII in G0, the cursor hidden.
-  std::string out = "\x1b[?6l\x1b[4l\x1b[r\x1b(B\x0f\x1b[0m\x1b[?25l\x1b[H\x1b[2J";
+  // terminals pmux's mouse modes). Only what painting needs: absolute CUPs (no origin mode), no
+  // insert mode, ASCII in G0, the cursor hidden. The margins stay (a full clear and CUPs
+  // ignore them); the exit snapshot restores the rest.
+  std::string out = "\x1b[?6l\x1b[4l\x1b(B\x0f\x1b[0m\x1b[?25l\x1b[H\x1b[2J";
   paint_lines(out, top, rows, cols, true);
   return out;
 }

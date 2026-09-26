@@ -164,7 +164,7 @@ The attached app behaves as if it were running directly in your terminal:
 
 - pmux runs on Linux only.
 - Only one client can attach to a process at a time. A new attach detaches the previous client.
-- Some terminal state isn't restored on reattach: OSC 8 hyperlinks, underline color, scroll margins, character sets, and alternate fonts.
+- Some terminal state isn't restored on reattach: OSC 8 hyperlinks, underline color, character sets, and alternate fonts.
 - Long lines are not reflowed when the terminal size changes between attaches.
 - The attached app never receives the detach key (see [While attached](#while-attached)).
 - The process's history is in pmux's scroll mode, not in your terminal's own scrollback, so your terminal's search and scrollbar don't see it.

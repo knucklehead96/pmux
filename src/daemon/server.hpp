@@ -78,6 +78,8 @@ class Server {
   // changed and reset while the client was scrolled (the terminal still has them).
   static std::string client_color_resets(const Client& c, const Screen& screen);
   void flush_held(Proc& p);
+  // After a snapshot to the attached client: its output continues at a sequence boundary.
+  void resume_output(Proc& p);
   void do_resize(Client& c, const Frame& frame);
   void do_input(Client& c, const Frame& frame);
   void do_kill(Client& c, const Frame& frame);

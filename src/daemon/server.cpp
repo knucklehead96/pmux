@@ -349,7 +349,7 @@ void Server::do_attach(Client& c, const Frame& frame) {
   // one or two signals depending on timing.)
   p->session->screen().resize(rows, cols);
   send_snapshot(c, p->session->screen().snapshot());
-  p->session->screen().resync_output();
+  resume_output(*p);
   send_state(c, p->session->screen(), true);
   if (!p->session->resize(rows, cols)) p->session->notify_winch();
   update_master_events(*p);
@@ -467,7 +467,7 @@ void Server::exit_scroll(Client& c, Proc& p) {
     return;
   }
   send_snapshot(c, std::exchange(c.scroll_color_resets, {}) + screen.snapshot(false));
-  screen.resync_output();
+  resume_output(p);
   send_state(c, screen, true);
 }
 
@@ -667,9 +667,17 @@ void Server::read_master(Proc& p) {
 
 void Server::flush_held(Proc& p) {
   p.held_deadline.reset();
-  const std::string held = p.session->screen().take_held();
+  // Without a client to send it to, the sequence stays held: whoever attaches next (or leaves
+  // scroll mode) gets it whole, since libvterm has not seen it complete either.
   Client* c = find_client(p.attached);
-  if (c && !c->scroll_top && !held.empty()) send(*c, bytes_frame(MsgType::Output, held));
+  if (!c || c->scroll_top) return;
+  const std::string held = p.session->screen().take_held();
+  if (!held.empty()) send(*c, bytes_frame(MsgType::Output, held));
+}
+
+void Server::resume_output(Proc& p) {
+  p.session->screen().resync_output();
+  if (p.session->screen().holding()) p.held_deadline = Clock::now() + kHoldTime;
 }
 
 void Server::close_master(Proc& p) {

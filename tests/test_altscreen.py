@@ -10,6 +10,11 @@ from helpers import PMUX_BIN, PYTHON, drain, read_file, read_until, wait_until
 from test_restore import INDICATOR, RestoreCase
 from tui import dump, list_rows
 
+
+def pexpect_eof():
+    import pexpect
+    return pexpect.EOF
+
 PMUX_MOUSE = b"\x1b[?1000h\x1b[?1006h"
 
 WHEEL_UP = b"\x1b[<64;10;10M"
@@ -267,14 +272,51 @@ class AppAltScreen(AltCase):
         self.detach(c, "app")
 
     def test_ris_in_tmux(self):
+        # tmux 3.4 ignores DECSTR: the soft reset must not rely on it alone.
         self.app("app")
         t = self.attach_pane_app("app")
+        self.out("app", b"\x1b[?25l\x1b[?7l\x1b[4h")   # e.g. left by a crashed app, then `reset`
+        wait_until(lambda: t.fmt("insert_flag")["insert_flag"] == "1", msg="insert mode on")
         t.type("!R")
         t.wait_for(lambda l: l[0] == "AFTER-RIS", msg="output after RIS")
-        f = t.fmt("alternate_on", "mouse_standard_flag", "mouse_sgr_flag")
-        self.assertEqual(f, {"alternate_on": "1", "mouse_standard_flag": "1", "mouse_sgr_flag": "1"},
-                         "pmux's screen and mouse after RIS")
+        f = t.fmt("alternate_on", "mouse_standard_flag", "mouse_sgr_flag", "cursor_flag", "wrap_flag",
+                  "insert_flag")
+        self.assertEqual(f, {"alternate_on": "1", "mouse_standard_flag": "1", "mouse_sgr_flag": "1",
+                             "cursor_flag": "1", "wrap_flag": "1", "insert_flag": "0"},
+                         "pmux's screen and mouse, the terminal's reset modes after RIS")
         self.detach_pane(t, "app")
+
+    def test_alt_exit_in_a_capped_sequence(self):
+        # 1049 past the parameter bytes pmux keeps: the sequence went out unchanged, pmux
+        # returns to the alternate screen.
+        self.app("app")
+        c = self.raw_attach("app")
+        seq = b"\x1b[?" + b"1;" * 140 + b"1049l"
+        self.out("app", b"<cap>" + seq + b"AFTER-CAP")
+        data = read_until(c, b"AFTER-CAP")
+        seg = data[data.index(b"<cap>"):]
+        self.assertIn(seq + b"\x1b[?1049h", seg, "back to the alternate screen")
+        self.assertIn(b"\x1b[1;1H\x1b[2K", seg, "and repainted")
+        self.detach(c, "app")
+
+    def test_sequence_split_across_attach(self):
+        # Held back (not at the terminal, not yet in libvterm) when the client attached: it goes
+        # out whole.
+        self.app("app")
+        self.out("app", b"\x1b[?200")
+        time.sleep(0.1)
+        c = self.raw_attach("app")
+        self.out("app", b"4hREADY")
+        data = read_until(c, b"READY")
+        self.assertIn(b"\x1b[?2004hREADY", data)
+        self.detach(c, "app")
+        self.out("app", b"\x1b[38;5;2")
+        time.sleep(0.1)
+        c = self.raw_attach("app")
+        self.out("app", b"8mGREEN")
+        data = read_until(c, b"GREEN")
+        self.assertIn(b"\x1b[38;5;28mGREEN", data)
+        self.detach(c, "app")
 
     def test_erase_scrollback_not_forwarded(self):
         self.app("app")
@@ -593,6 +635,28 @@ class ScrollMode(AltCase):
         self.assertFalse(any("23m" in x for x in lines), dump(lines))
         self.detach_pane(t, "app")
 
+    def test_scroll_region_kept(self):
+        # apt-style: a scroll region without the last row, which holds a progress bar.
+        t = self.pane([PMUX_BIN, "-a", "app"], rows=10, cols=40)
+        self.wait_alt(t)
+        self.out("app", b"".join(b"line %02d\r\n" % i for i in range(1, 20))
+                 + b"\x1b7\x1b[1;9r\x1b8\x1b[10;1HPROGRESS\x1b[9;1H")
+        t.wait_for(lambda l: l[9] == "PROGRESS", msg="progress bar")
+        t.raw(WHEEL_UP)
+        t.wait_for(lambda l: INDICATOR.search(l[0]), msg="scroll mode")
+        t.keys("q")
+        t.wait_for(lambda l: l[9] == "PROGRESS" and not INDICATOR.search(l[0]), msg="live")
+        self.out("app", b"\r\nmore 1\r\nmore 2\r\nmore 3")
+        lines = t.wait_for(lambda l: l[8] == "more 3", msg="output in the region")
+        self.assertEqual(lines[9], "PROGRESS", "after scroll mode\n" + dump(lines))
+        self.detach_pane(t, "app")
+        t = self.pane([PMUX_BIN, "-a", "app"], rows=10, cols=40)
+        t.wait_for(lambda l: l[8] == "more 3", msg="reattach")
+        self.out("app", b"\r\nmore 4\r\nmore 5")
+        lines = t.wait_for(lambda l: l[8] == "more 5", msg="output after reattach")
+        self.assertEqual(lines[9], "PROGRESS", "after reattach\n" + dump(lines))
+        self.detach_pane(t, "app")
+
     def test_bell_while_scrolled(self):
         t = self.start_list("app", rows=24, cols=80)
         t.keys("Enter")
@@ -664,6 +728,31 @@ class ViewScroll(AltCase):
                            "pmux's mouse after the snapshot's DECSTR")
         c.send(b"\x1b")
         read_until(c, b"done")
+
+    def test_big_view_snapshot_intact(self):
+        # A view snapshot over 1 MiB spans frames: pmux's mouse modes go after it, not inside.
+        rows, cols = 100, 500
+        cells = b"".join(b"\x1b[38;2;%d;%d;7;48;2;%d;%d;9mx" % (i % 256, i // 256 % 256, i // 7 % 256, i % 199) for i in range(rows * cols - 1))
+        script = self.px.path("big.bin")
+        with open(script, "wb") as f:
+            f.write(b"\x1b[H" + cells)
+        c = self.px.spawn_attach(["-n", "big", "-d", "--", "sh", "-c", "cat %s; sleep 0.3" % script], rows, cols)
+        c.expect(pexpect_eof())
+        self.px.wait_state("big", lambda s: s.startswith("exited"))
+        c = self.px.spawn_attach([], rows=rows, cols=cols)
+        read_until(c, b"big")
+        time.sleep(0.3)
+        drain(c)
+        c.send(b"\r")
+        data = read_until(c, PMUX_MOUSE, timeout=30)
+        time.sleep(0.5)
+        data += drain(c)
+        start = data.rfind(b"\x1b[!p")
+        self.assertGreater(len(data) - start, 1 << 20, "snapshot size")
+        self.assertEqual(data[start:].count(b"\x1b[?1000h"), 1, "mouse modes inside the snapshot")
+        self.assertTrue(data.endswith(b"\x1b[?25h" + PMUX_MOUSE) or data.endswith(PMUX_MOUSE))
+        c.send(b"\x1b")
+        read_until(c, b"big")
 
     def test_view_exited_scrolls(self):
         self.new_exited("done", "i=1; while [ $i -le 60 ]; do echo line $i; i=$((i+1)); done")

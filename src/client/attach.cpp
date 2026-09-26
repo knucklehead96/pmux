@@ -825,11 +825,10 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id, const Config& c
   tcsetattr(STDIN_FILENO, TCSANOW, &raw);
   write_all(STDOUT_FILENO, kEnterAltScreen.data(), kEnterAltScreen.size());
   // A snapshot's DECSTR turns the mouse modes off on some terminals (VTE): pmux's mouse (for
-  // the wheel) is turned on after each.
+  // the wheel) is turned on after each complete one (OK, or the STATE after a scroll paint; a
+  // snapshot may span frames).
   auto write_snapshot = [](const Frame& frame) {
-    std::string bytes(frame.payload.begin(), frame.payload.end());
-    bytes += kPmuxMouse;
-    write_all(STDOUT_FILENO, bytes.data(), bytes.size());
+    write_all(STDOUT_FILENO, frame.payload.data(), frame.payload.size());
   };
 
   Winsize ws = terminal_size(STDIN_FILENO);
@@ -847,6 +846,7 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id, const Config& c
       if (frame->type == MsgType::Ok) {
         resets = PayloadReader(frame->payload).str();
         shown = true;
+        write_all(STDOUT_FILENO, kPmuxMouse.data(), kPmuxMouse.size());
       } else if (frame->type == MsgType::Error) {
         result.error = PayloadReader(frame->payload).str();
       }
@@ -878,7 +878,8 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id, const Config& c
             r.u16();
             const std::uint32_t offset = r.u32();
             const std::uint32_t total = r.u32();
-            const std::string mark = scrolled && r.ok() ? indicator(style, offset, total) : "";
+            std::string mark(kPmuxMouse);
+            if (scrolled && r.ok()) mark += indicator(style, offset, total);
             write_all(STDOUT_FILENO, mark.data(), mark.size());
           }
         }
