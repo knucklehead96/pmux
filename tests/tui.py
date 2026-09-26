@@ -10,7 +10,9 @@ leaves a dead pane whose exit status and final terminal modes can still be
 inspected) and the PmuxEnv environment plus COLORTERM=truecolor.
 
 Input:
-  keys('Down', 'Enter', 'C-n', 'C-\\')  tmux key names (send-keys)
+  keys('Down', 'Enter', 'C-n', 'C-Left') tmux key names (send-keys); C-Left
+                                         sends ESC [ 1 ; 5 D (checked by
+                                         HarnessSelfTest)
   type('text')                           literal text (send-keys -l)
   raw(b'...')                            exact bytes (send-keys -H); verified
                                          verbatim for all 256 byte values by
@@ -70,14 +72,32 @@ TEAL_ACCENT = (95, 200, 200)
 # ---------------------------------------------------------------------------
 # list-screen text helpers
 
-GLYPHS = "●◌!○"
-ROW_RE = re.compile(r"^   ([●◌!○]) (\S+)")
+GLYPHS = "●!○"
+ROW_RE = re.compile(r"^   ([●!○]) (\S+)")
 AGE_RE = r"\d+(?:s|m|h(?: \d+m)?|d)"
-FOOTER_LIST = " ↑↓ select  enter attach  ^n new  ^r rename  ^x kill  ^q quit"
-FOOTER_FILTER = " ↑↓ select  enter attach  esc clear filter"
-FOOTER_EMPTY = " ^n new  ^q quit"
+LIST_HINTS = ["↑↓ select", "enter attach", "ctrl+n new", "ctrl+r rename", "ctrl+x kill",
+              "ctrl+c quit"]
+FILTER_HINTS = ["↑↓ select", "enter attach", "esc clear filter"]
+EMPTY_HINTS = ["ctrl+n new", "ctrl+c quit"]
+
+
+def footer_of(hints):
+    return " " + "  ".join(hints)
+
+
+FOOTER_LIST = footer_of(LIST_HINTS)
+FOOTER_FILTER = footer_of(FILTER_HINTS)
+FOOTER_EMPTY = footer_of(EMPTY_HINTS)
+FOOTER_TYPE_TO_FILTER = "  type to filter"
+FOOTER_QUIT = " press ctrl+c again to quit"
 FOOTER_RENAME = " enter save · esc cancel"
 DIALOG_HINT = "enter create · tab next · esc cancel"
+
+
+def footer_kill(name, exited=False):
+    """(footer text, the red part) of the first Ctrl+X."""
+    red = ("remove %s" if exited else "kill %s") % name
+    return " press ctrl+x again to " + red, red
 
 
 def name_width(names):
@@ -572,7 +592,7 @@ class TuiCase(PmuxTestCase):
         return t.wait_for(winch_marker(name), msg="attach to %s" % name)
 
     def detach_to_list(self, t, *names):
-        t.keys("C-\\")
+        t.keys("C-Left")
         lines = t.wait_list(*names)
         self.assertFalse(any("[detached" in l for l in lines),
                          "TUI must not show a [detached ...] message\n" + dump(lines))

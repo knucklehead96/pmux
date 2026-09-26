@@ -14,9 +14,9 @@ import unittest
 
 import pexpect
 
-from helpers import (DETACH, PMUX_BIN, TIMEOUT, PmuxTestCase, expect_exit, read_file, read_until,
-                     wait_until)
-from tui import TmuxTui, TuiCase, parse_ansi_line, winch_marker
+from helpers import (CTRL_BACKSLASH, CTRL_LEFT, CTRL_SHIFT_LEFT, DETACH, PMUX_BIN, TIMEOUT,
+                     PmuxTestCase, expect_exit, read_file, read_until, wait_until)
+from tui import FOOTER_LIST, TmuxTui, TuiCase, parse_ansi_line, winch_marker
 
 # The exact reset sequence written on detach (SPEC "Attached" / "On detach").
 MODE_RESETS = (b"\x1b[<99u"
@@ -50,8 +50,12 @@ def children_of(pid):
 
 
 class ClientCase(PmuxTestCase):
+    CONFIG = None   # ~/.pmux/config text, written before the daemon starts
+
     def setUp(self):
         super().setUp()
+        if self.CONFIG is not None:
+            self.px.write_config(self.CONFIG)
         p = self.px.run("-l")   # daemon started outside any pty
         self.assertEqual(p.returncode, 0, "daemon start via -l failed: %r" % p.stderr)
 
@@ -94,7 +98,7 @@ class FloodDetach(ClientCase):
         out = b""
         while b"[detached from flood]" not in out:
             if time.monotonic() - t0 > 10:
-                self.fail("Ctrl+\\ ignored for 10 s while output floods; tail %r" % out[-200:])
+                self.fail("Ctrl+Left ignored for 10 s while output floods; tail %r" % out[-200:])
             try:
                 out += slow_read()
             except pexpect.EOF:
@@ -275,7 +279,7 @@ class TuiSignalWhileAttached(TuiCase):
         t.wait_dead()
         self.assertEqual(t.dead_status(), 128 + signal.SIGTERM, t.describe())
         self.assertEqual(t.modes(), ("0", "0"), "alt screen / mouse reporting left on")
-        self.assertIn(self.px.entry("alt")["state"], ("running", "idle"), "the process must survive")
+        self.assertEqual(self.px.entry("alt")["state"], "running", "the process must survive")
 
 
 # ---------------------------------------------------------------------------
@@ -283,59 +287,133 @@ class TuiSignalWhileAttached(TuiCase):
 
 
 class DetachKeyForms(ClientCase):
-    def detach_with(self, *parts):
-        log = self.inlog()
-        c = self.px.attach("app")
+    """Default detach_key (ctrl+left): kitty lock modifiers / events, split
+    sequences, look-alikes.  Subclasses rerun the same checks for the
+    other detach_key values."""
+    KEY = CTRL_LEFT
+    DETACHES = [b"\x1b[1;69D", b"\x1b[1;133:1D", b"\x1b[1;197D", b"\x1b[1;5:1D", b"\x1bOd"]
+    SPLITS = [(b"\x1b[1;", b"5D"), (b"\x1b[1;6", b"9:1D"), (b"\x1b[1", b";13", b"3:1D")]
+    SWALLOWED = b"\x1b[1;5:2D\x1b[1;69:3D\x1b[1;133:2D\x1b[1;197:3D"
+    LOOKALIKES = (b"\x1b[D" b"\x1b[1;2D" b"\x1b[1;3D" b"\x1b[1;5C" b"\x1b[1;6D" b"\x1b[1;70D"
+                  b"\x1b[1;7D" b"\x1b[1;13D" b"\x1b[1;69C" b"\x1b[1;5:1C" b"\x1b[5D" b"\x1bOD"
+                  b"\x1bOc" b"\x1c" b"\x1b[92;5u" b"\x1b[92;69u" b"\x1b[27;5;92~" b"x")
+
+    def detach_with(self, *parts, name="app"):
+        log = self.inlog(name)
+        c = self.px.attach(name)
         c.delaybeforesend = None
         seen = self.sync(c, log, b"", b"before")
         for i, part in enumerate(parts):
             if i:
                 time.sleep(0.002)   # separate reads, inside the 20 ms hold-back
             c.send(part)
-        status, sig, out = expect_exit(c, b"[detached from app]")
+        status, sig, out = expect_exit(c, b"[detached from %s]" % name.encode())
         self.assertEqual((status, sig), (0, None))
         self.assertIn(MODE_RESETS, out)
-        c = self.px.attach("app")
+        c = self.px.attach(name)
         self.sync(c, log, seen, b"after")   # no detach bytes reached the app
-        self.detach(c, "app")
+        self.detach(c, name, key=self.KEY)
 
-    def test_kitty_caps_lock(self):
-        self.detach_with(b"\x1b[92;69u")
+    def test_plain_key(self):
+        self.detach_with(self.KEY)
 
-    def test_kitty_num_lock_press_event(self):
-        self.detach_with(b"\x1b[92;133:1u")
+    def test_other_forms(self):
+        for i, key in enumerate(self.DETACHES):
+            with self.subTest(key=key):
+                self.detach_with(key, name="form%d" % i)
 
-    def test_kitty_both_locks(self):
-        self.detach_with(b"\x1b[92;197u")
-
-    def test_xterm_modify_other_keys(self):
-        self.detach_with(b"\x1b[27;5;92~")
-
-    def test_split_modify_other_keys(self):
-        self.detach_with(b"\x1b[27;5", b";92~")
-
-    def test_split_kitty_lock(self):
-        self.detach_with(b"\x1b[92;6", b"9:1u")
+    def test_split_sequences(self):
+        for i, parts in enumerate(self.SPLITS):
+            with self.subTest(parts=parts):
+                self.detach_with(*parts, name="split%d" % i)
 
     def test_repeat_and_release_swallowed(self):
         log = self.inlog()
         c = self.px.attach("app")
-        c.send(b"a\x1b[92;5:2u\x1b[92;69:3u\x1b[92;133:2ub")
+        c.send(b"a" + self.SWALLOWED + b"b")
         self.wait_log(log, b"ab")
         self.assertTrue(c.isalive(), "repeat / release must not detach")
         self.sync(c, log, b"ab")
-        self.detach(c, "app")
+        self.detach(c, "app", key=self.KEY)
 
     def test_lookalikes_pass_verbatim(self):
         log = self.inlog()
         c = self.px.attach("app")
-        payload = (b"\x1b[92;6u" b"\x1b[27;6;92~" b"\x1b[92;7u" b"\x1b[92;13u" b"\x1b[92;70u"
-                   b"\x1b[92;5:4u" b"\x1b[27;5;93~" b"\x1b[27;5;92u" b"\x1b[93;69u" b"\x1b[92;69~"
-                   b"x")
-        c.send(payload)
-        self.wait_log(log, payload)
+        c.send(self.LOOKALIKES)
+        self.wait_log(log, self.LOOKALIKES)
         self.assertTrue(c.isalive(), "look-alikes must not detach")
-        self.detach(c, "app")
+        self.detach(c, "app", key=self.KEY)
+
+    def test_detach_mid_chunk(self):
+        log = self.inlog()
+        c = self.px.attach("app")
+        c.send(b"abc" + self.KEY + b"def")
+        status, sig, out = expect_exit(c, b"[detached from app]")
+        self.assertEqual((status, sig), (0, None))
+        c = self.px.attach("app")
+        self.sync(c, log, b"abc", b"|next")
+        self.detach(c, "app", key=self.KEY)
+
+
+class DetachKeyCtrlBackslash(DetachKeyForms):
+    CONFIG = "detach_key = ctrl+backslash\n"
+    KEY = CTRL_BACKSLASH
+    DETACHES = [b"\x1b[92;5u", b"\x1b[92;5:1u", b"\x1b[92;69u", b"\x1b[92;133:1u",
+                b"\x1b[92;197u", b"\x1b[27;5;92~"]
+    SPLITS = [(b"\x1b[27;5", b";92~"), (b"\x1b[92;6", b"9:1u"), (b"\x1b[9", b"2;5u")]
+    SWALLOWED = b"\x1b[92;5:2u\x1b[92;69:3u\x1b[92;133:2u"
+    LOOKALIKES = (b"\x1b[92;6u" b"\x1b[27;6;92~" b"\x1b[92;7u" b"\x1b[92;13u" b"\x1b[92;70u"
+                  b"\x1b[27;5;93~" b"\x1b[27;5;92u" b"\x1b[93;69u" b"\x1b[92;69~"
+                  b"\x1b[93;5u" b"\x1b[92;3u" b"\x1b[92u"
+                  b"\x1b[1;5D" b"\x1b[1;5:1D" b"\x1b[1;69D" b"\x1bOd" b"x")
+
+
+class DetachKeyCtrlShiftLeft(DetachKeyForms):
+    CONFIG = "detach_key = ctrl+shift+left\n"
+    KEY = CTRL_SHIFT_LEFT
+    DETACHES = [b"\x1b[1;6:1D", b"\x1b[1;70D", b"\x1b[1;134:1D", b"\x1b[1;198D"]
+    SPLITS = [(b"\x1b[1;", b"6D"), (b"\x1b[1;7", b"0:1D")]
+    SWALLOWED = b"\x1b[1;6:2D\x1b[1;70:3D\x1b[1;134:2D"
+    LOOKALIKES = (b"\x1b[D" b"\x1b[1;2D" b"\x1b[1;5D" b"\x1b[1;69D" b"\x1b[1;5:1D" b"\x1bOd"
+                  b"\x1b[1;6C" b"\x1b[1;7D" b"\x1b[1;14D" b"\x1c" b"\x1b[92;5u" b"x")
+
+
+class DetachKeyInvalid(DetachKeyForms):
+    """An invalid detach_key falls back to the default (ctrl+left)."""
+    CONFIG = "detach_key = ctrl+q\n"
+
+    def test_warning(self):
+        p = self.px.run("-l")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn(b"pmux: ~/.pmux/config:1: invalid value for detach_key: 'ctrl+q'", p.stderr)
+
+
+class TuiDetachKeyConfig(TuiCase):
+    """The list TUI honours detach_key too; the other keys reach the app."""
+
+    def check(self, detach, passes, passes_bytes):
+        log = self.marker("app")
+        t = self.start_list("app")
+        t.keys("Enter")
+        self.wait_attached(t, "app")
+        t.keys(passes)
+        t.type("z")
+        wait_until(lambda: read_file(log) == passes_bytes + b"z", msg=lambda: read_file(log))
+        t.keys(detach)
+        t.wait_list("app")
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, msg="back in the list")
+        self.assertEqual(read_file(log), passes_bytes + b"z", "detach key reached the app")
+
+    def test_ctrl_backslash(self):
+        self.px.write_config("theme = dark\ndetach_key = ctrl+backslash\n")
+        self.check("C-\\", "C-Left", CTRL_LEFT)
+
+    def test_ctrl_shift_left(self):
+        self.px.write_config("theme = dark\ndetach_key = ctrl+shift+left\n")
+        self.check("C-S-Left", "C-Left", CTRL_LEFT)
+
+    def test_default_ctrl_left(self):
+        self.check("C-Left", "C-\\", CTRL_BACKSLASH)
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +462,9 @@ class ListQueryReply(TuiCase):
         self.wait_log(log, b"abc" + CURSOR_SHAPE_REPLY + b"d")
         c.send(DETACH)
         read_until(c, b"qreply")             # back in the list
-        c.send(b"\x11")
+        c.send(b"\x03")
+        time.sleep(0.1)
+        c.send(b"\x03")
         c.expect(pexpect.EOF)
 
 

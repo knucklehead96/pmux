@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -39,6 +40,7 @@
 #include "client/attach.hpp"
 #include "client/connect.hpp"
 #include "common/fd.hpp"
+#include "common/paths.hpp"
 #include "common/protocol.hpp"
 
 namespace pmux {
@@ -54,6 +56,7 @@ constexpr int kKillTimeoutMs = 10000;
 constexpr auto kPollInterval = std::chrono::milliseconds(500);
 constexpr auto kDoubleClick = std::chrono::milliseconds(400);
 constexpr auto kLongNote = std::chrono::seconds(3);
+constexpr auto kPressAgain = std::chrono::seconds(2);  // Ctrl+C / Ctrl+X second-press window
 constexpr int kMinCols = 40;  // smaller terminals only show "Terminal too small"
 constexpr int kMinRows = 8;
 
@@ -506,6 +509,7 @@ struct Poller {
   bool wake = false;
   bool lost = false;  // the daemon cannot be reached any more
   std::optional<std::vector<ProcInfo>> latest;
+  std::vector<std::pair<std::uint32_t, std::string>> kill_errors;  // background kills that failed
   ftxui::ScreenInteractive* screen = nullptr;
 
   void request_refresh() {
@@ -549,12 +553,11 @@ struct Poller {
 
 // ---------------------------------------------------------------- the list screen
 
-enum class Status { Running, Idle, Bell, Exited, Signaled };
+enum class Status { Running, Bell, Exited, Signaled };
 
 Status status_of(const ProcInfo& p) {
   if (p.exited) return WIFSIGNALED(p.wait_status) ? Status::Signaled : Status::Exited;
-  if (p.bell) return Status::Bell;
-  return p.idle_ms < 5000 ? Status::Running : Status::Idle;
+  return p.bell ? Status::Bell : Status::Running;
 }
 
 struct Note {
@@ -563,7 +566,7 @@ struct Note {
   SteadyClock::time_point until;
 };
 
-enum class Mode { List, Dialog, Rename, KillConfirm };
+enum class Mode { List, Dialog, Rename };
 
 struct ListLine {
   enum Kind { Blank, Header, Row } kind = Blank;
@@ -589,6 +592,13 @@ class Tui {
         ctl_(std::move(ctl)) {}
 
   void set_procs(std::vector<ProcInfo> procs) {
+    std::set<std::uint32_t> still_hidden;
+    std::erase_if(procs, [&](const ProcInfo& p) {
+      if (!hidden_.contains(p.id)) return false;
+      still_hidden.insert(p.id);
+      return true;
+    });
+    hidden_ = std::move(still_hidden);
     procs_ = std::move(procs);
     rebuild();
   }
@@ -624,12 +634,10 @@ class Tui {
   void start_rename();
   void submit_rename();
   void kill_selected();
-  void confirm_kill();
 
   bool on_list_event(const Event& e);
   bool on_dialog_event(const Event& e);
   bool on_rename_event(const Event& e);
-  bool on_kill_event(const Event& e);
   bool on_mouse(const Event& e);
   std::optional<Frame> ctl_request(const Frame& frame);
 
@@ -639,7 +647,8 @@ class Tui {
   void draw_footer(Canvas& c, int y);
   void draw_dialog(Canvas& c);
   std::vector<Span> keys(const std::vector<std::pair<std::string, std::string>>& pairs,
-                         const std::string& sep) const;
+                         const std::string& sep, int max_width = -1) const;
+  std::vector<Span> press_again(const std::string& key, const std::string& what, bool danger) const;
 
   Style text() const { return {}; }
   Style secondary() const { return {theme_.secondary}; }
@@ -672,8 +681,12 @@ class Tui {
   std::string rename_buf_;
   std::uint32_t rename_id_ = 0;
 
-  // Kill confirm
+  // Pending second presses: Ctrl+C quits, Ctrl+X kills / removes kill_id_.
+  std::optional<SteadyClock::time_point> quit_until_;
+  std::optional<SteadyClock::time_point> kill_until_;
   std::uint32_t kill_id_ = 0;
+  // Killed in the background: hidden until the daemon has removed them (or the kill failed).
+  std::set<std::uint32_t> hidden_;
 
   // Layout of the last frame
   int scroll_ = 0;
@@ -803,7 +816,7 @@ void Tui::attach_to(const ProcInfo& proc, bool via_mouse) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       tcflush(STDIN_FILENO, TCIFLUSH);
     }
-    result = attach_session(fd.get(), id);
+    result = attach_session(fd.get(), id, config_.detach_key);
   })();
   {
     std::lock_guard lock(poller_->m);
@@ -917,9 +930,7 @@ void Tui::submit_dialog() {
   PayloadWriter w;
   w.str(name).str(dir).strs(argv).strs(env);
   w.u16(static_cast<std::uint16_t>(size.dimy)).u16(static_cast<std::uint16_t>(size.dimx));
-  const mode_t mask = umask(0);
-  umask(mask);
-  w.u32(mask);
+  w.u32(current_umask());
   auto reply = ctl_request(make_frame(MsgType::New, w.take()));
   if (!reply || reply->type != MsgType::Ok) {
     dialog_error_ = reply_error(reply);
@@ -955,27 +966,39 @@ void Tui::submit_rename() {
   refresh_now();
 }
 
+// First Ctrl+X arms, a second one on the same row within kPressAgain kills (running) or removes
+// (exited) it.
 void Tui::kill_selected() {
   const ProcInfo* p = selected();
   if (!p) return;
+  const auto now = SteadyClock::now();
+  if (!kill_until_ || now >= *kill_until_ || kill_id_ != p->id) {
+    kill_id_ = p->id;
+    kill_until_ = now + kPressAgain;
+    note_.reset();
+    return;
+  }
+  kill_until_.reset();
+  const std::uint32_t id = p->id;
   if (p->exited) {
-    auto reply = ctl_request(make_frame(MsgType::Remove, PayloadWriter().u32(p->id).take()));
+    auto reply = ctl_request(make_frame(MsgType::Remove, PayloadWriter().u32(id).take()));
     if (!reply || reply->type != MsgType::Ok) note(reply_error(reply), true, kLongNote);
     refresh_now();
     return;
   }
-  kill_id_ = p->id;
-  note_.reset();
-  mode_ = Mode::KillConfirm;
-}
-
-void Tui::confirm_kill() {
-  mode_ = Mode::List;
-  const std::uint32_t id = kill_id_;
+  // The daemon removes the entry once the process has exited; the row goes now.
+  hidden_.insert(id);
+  std::erase_if(procs_, [id](const ProcInfo& q) { return q.id == id; });
+  rebuild();
   std::thread([id, poller = poller_] {
     block_attach_signals();
     UniqueFd fd = connect_daemon();
-    request(fd.get(), make_frame(MsgType::Kill, PayloadWriter().u32(id).take()), kKillTimeoutMs);
+    auto reply = request(fd.get(), make_frame(MsgType::Kill, PayloadWriter().u32(id).u8(1).take()),
+                         kKillTimeoutMs);
+    if (!reply || reply->type != MsgType::Ok) {
+      std::lock_guard lock(poller->m);
+      poller->kill_errors.emplace_back(id, "kill failed: " + reply_error(reply));
+    }
     poller->request_refresh();
   }).detach();
 }
@@ -1001,23 +1024,48 @@ bool Tui::handle_event(const Event& event) {
       quit();
       return true;
     }
+    std::vector<std::pair<std::uint32_t, std::string>> kill_errors;
+    {
+      std::lock_guard lock(poller_->m);
+      kill_errors = std::exchange(poller_->kill_errors, {});
+    }
+    for (auto& [id, message] : kill_errors) {
+      hidden_.erase(id);
+      note(std::move(message), true, kLongNote);
+    }
     if (list) set_procs(std::move(*list));
     return true;
   }
-  if (event == Event::CtrlC || event == Event::CtrlQ) {
-    quit();
+  if (event.is_cursor_position() || event.is_cursor_shape()) return false;  // terminal replies
+  const auto now = SteadyClock::now();
+  if (event == Event::CtrlC) {
+    // Quit on the second Ctrl+C within kPressAgain; daemon and processes keep running.
+    if (quit_until_ && now < *quit_until_) {
+      quit();
+      return true;
+    }
+    quit_until_ = now + kPressAgain;
+    kill_until_.reset();
     return true;
+  }
+  if (!event.is_mouse()) {  // any other key cancels a pending second press
+    quit_until_.reset();
+    if (event != Event::CtrlX) kill_until_.reset();
   }
   if (event == Event::CtrlZ) return true;  // no job control: the poller must not race a suspend
   if (const auto size = ftxui::Terminal::Size(); too_small(size.dimx, size.dimy)) return true;
-  if (event.is_mouse()) return on_mouse(event);
-  switch (mode_) {
-    case Mode::List: return on_list_event(event);
-    case Mode::Dialog: return on_dialog_event(event);
-    case Mode::Rename: return on_rename_event(event);
-    case Mode::KillConfirm: return on_kill_event(event);
+  bool handled = false;
+  if (event.is_mouse()) {
+    handled = on_mouse(event);
+  } else {
+    switch (mode_) {
+      case Mode::List: handled = on_list_event(event); break;
+      case Mode::Dialog: handled = on_dialog_event(event); break;
+      case Mode::Rename: handled = on_rename_event(event); break;
+    }
   }
-  return false;
+  if (kill_until_ && kill_id_ != selected_) kill_until_.reset();  // the selection moved
+  return handled;
 }
 
 bool Tui::on_list_event(const Event& e) {
@@ -1075,12 +1123,6 @@ bool Tui::on_rename_event(const Event& e) {
   return true;
 }
 
-bool Tui::on_kill_event(const Event& e) {
-  if (e == Event::Character('y') || e == Event::Character('Y')) confirm_kill();
-  else if (e == Event::Character('n') || e == Event::Character('N') || e == Event::Escape) mode_ = Mode::List;
-  return true;
-}
-
 bool Tui::on_mouse(const Event& e) {
   if (mode_ != Mode::List) return true;
   Event copy = e;  // Event::mouse() is non-const
@@ -1108,26 +1150,43 @@ bool Tui::on_mouse(const Event& e) {
   return true;
 }
 
+// Key hints (key in text color, description in secondary). With `max_width`, whole hints are
+// dropped from the right until the rest fits; a pair with an empty key is plain secondary text.
 std::vector<Span> Tui::keys(const std::vector<std::pair<std::string, std::string>>& pairs,
-                            const std::string& sep) const {
+                            const std::string& sep, int max_width) const {
   std::vector<Span> out;
+  int width = 0;
   for (std::size_t i = 0; i < pairs.size(); ++i) {
-    if (i > 0) out.push_back({sep, secondary()});
-    out.push_back({pairs[i].first, text()});
-    out.push_back({" " + pairs[i].second, secondary()});
+    std::vector<Span> hint;
+    if (i > 0) hint.push_back({sep, secondary()});
+    if (pairs[i].first.empty()) {
+      hint.push_back({pairs[i].second, secondary()});
+    } else {
+      hint.push_back({pairs[i].first, text()});
+      hint.push_back({" " + pairs[i].second, secondary()});
+    }
+    const int w = spans_width(hint);
+    if (max_width >= 0 && width + w > max_width) break;
+    width += w;
+    out.insert(out.end(), hint.begin(), hint.end());
   }
   return out;
+}
+
+// `press <key> again to <what>`, with `what` in red if `danger`.
+std::vector<Span> Tui::press_again(const std::string& key, const std::string& what, bool danger) const {
+  return {{"press ", secondary()}, {key, text()}, {" again to ", secondary()},
+          {what, danger ? error() : secondary()}};
 }
 
 void Tui::draw_header(Canvas& c) {
   c.put(1, 0, "✻ pmux", accent(true));
   if (procs_.empty()) return;
-  int running = 0, idle = 0, exited = 0;
+  int running = 0, exited = 0;
   for (const auto& p : procs_) {
     switch (status_of(p)) {
       case Status::Running:
       case Status::Bell: ++running; break;
-      case Status::Idle: ++idle; break;
       case Status::Exited:
       case Status::Signaled: ++exited; break;
     }
@@ -1139,7 +1198,6 @@ void Tui::draw_header(Canvas& c) {
     counts += std::to_string(n) + " " + what;
   };
   add(running, "running");
-  add(idle, "idle");
   add(exited, "exited");
   const int x = c.width() - 1 - text_width(counts);
   if (x > 8) c.put(x, 0, counts, secondary());
@@ -1168,7 +1226,6 @@ void Tui::draw_row(Canvas& c, int y, const ProcInfo& p, int name_w) {
   Color glyph_color = theme_.running;
   switch (status) {
     case Status::Running: break;
-    case Status::Idle: glyph = "◌", glyph_color = theme_.secondary; break;
     case Status::Bell: glyph = "!", glyph_color = theme_.bell; break;
     case Status::Exited:
     case Status::Signaled: glyph = "○", glyph_color = theme_.secondary; break;
@@ -1221,11 +1278,6 @@ void Tui::draw_row(Canvas& c, int y, const ProcInfo& p, int name_w) {
   const std::string fg = p.fg_command.empty() ? join(p.argv) : p.fg_command;
   switch (status) {
     case Status::Running: detail = {{fg, text()}}; break;
-    case Status::Idle: {
-      const std::int64_t since = p.last_output ? std::int64_t(p.last_output) : std::int64_t(p.created);
-      detail = {{fg, text()}, {" · idle " + format_duration(now - since), secondary()}};
-      break;
-    }
     case Status::Bell: detail = {{fg, text()}, {" · bell", secondary()}}; break;
     case Status::Exited: {
       const int code = WEXITSTATUS(p.wait_status);
@@ -1242,27 +1294,27 @@ void Tui::draw_row(Canvas& c, int y, const ProcInfo& p, int name_w) {
 void Tui::draw_footer(Canvas& c, int y) {
   std::vector<Span> spans{{" ", text()}};
   auto append = [&](std::vector<Span> more) { spans.insert(spans.end(), more.begin(), more.end()); };
-  if (note_ && SteadyClock::now() >= note_->until) note_.reset();
+  const int room = c.width() - 1 - 1;  // put_spans' limit, minus the leading blank
+  const ProcInfo* kill_target = kill_until_ ? find(kill_id_) : nullptr;
 
-  if (note_ && mode_ != Mode::KillConfirm) {
+  if (quit_until_) {
+    append(press_again("ctrl+c", "quit", false));
+  } else if (kill_target) {
+    append(press_again("ctrl+x", (kill_target->exited ? "remove " : "kill ") + kill_target->name, true));
+  } else if (note_) {
     spans.push_back({note_->text, note_->error ? error() : secondary()});
   } else if (mode_ == Mode::Rename) {
-    append(keys({{"enter", "save"}, {"esc", "cancel"}}, " · "));
-  } else if (mode_ == Mode::KillConfirm) {
-    const ProcInfo* p = find(kill_id_);
-    const std::string name = p ? p->name : "?";
-    const std::string cmd = p ? join(p->argv) : "";
-    spans.push_back({"Kill", error(true)});
-    spans.push_back({" " + name + " (" + cmd + ")?  ", text()});
-    append(keys({{"y", "yes"}, {"n", "no"}}, " · "));
+    append(keys({{"enter", "save"}, {"esc", "cancel"}}, " · ", room));
   } else if (procs_.empty()) {
-    append(keys({{"^n", "new"}, {"^q", "quit"}}, "  "));
+    append(keys({{"ctrl+n", "new"}, {"ctrl+c", "quit"}}, "  ", room));
   } else if (!filter_.empty()) {
-    append(keys({{"↑↓", "select"}, {"enter", "attach"}, {"esc", "clear filter"}}, "  "));
+    append(keys({{"↑↓", "select"}, {"enter", "attach"}, {"esc", "clear filter"}}, "  ", room));
   } else {
-    append(keys({{"↑↓", "select"}, {"enter", "attach"}, {"^n", "new"}, {"^r", "rename"}, {"^x", "kill"}, {"^q", "quit"}},
-                "  "));
-    if (procs_.size() > 8) spans.push_back({"  type to filter", secondary()});
+    std::vector<std::pair<std::string, std::string>> hints = {
+        {"↑↓", "select"}, {"enter", "attach"}, {"ctrl+n", "new"},
+        {"ctrl+r", "rename"}, {"ctrl+x", "kill"}, {"ctrl+c", "quit"}};
+    if (procs_.size() > 8) hints.push_back({"", "type to filter"});
+    append(keys(hints, "  ", room));
   }
   put_spans(c, 0, y, spans, c.width() - 1);
 }
@@ -1322,11 +1374,19 @@ ftxui::Element Tui::render() {
   Canvas c(W, H);
   line_ids_.assign(std::size_t(H), 0);
 
+  // Expired second-press prompts and notes; a pending kill also ends with its row's selection.
+  const auto now = SteadyClock::now();
+  if (quit_until_ && now >= *quit_until_) quit_until_.reset();
+  if (kill_until_ && (now >= *kill_until_ || kill_id_ != selected_ || !find(kill_id_))) kill_until_.reset();
+  if (note_ && now >= note_->until) note_.reset();
+
   if (too_small(W, H)) {
-    const std::string msg = "Terminal too small", hint = "^q quit";
+    const std::string msg = "Terminal too small";
+    const std::vector<Span> hint =
+        quit_until_ ? press_again("ctrl+c", "quit", false) : std::vector<Span>{{"ctrl+c quit", secondary()}};
     const int y = std::max(0, (H - 2) / 2);
     c.put(std::max(0, (W - text_width(msg)) / 2), y, msg, text());
-    c.put(std::max(0, (W - text_width(hint)) / 2), y + 1, hint, secondary());
+    put_spans(c, std::max(0, (W - spans_width(hint)) / 2), y + 1, hint, W);
     return std::make_shared<CanvasNode>(std::move(c));
   }
 
@@ -1334,7 +1394,7 @@ ftxui::Element Tui::render() {
   if (procs_.empty()) {
     c.put(3, 3, "No processes yet.", text());
     int x = c.put(3, 4, "Press ", secondary());
-    x = c.put(x, 4, "^n", text());
+    x = c.put(x, 4, "ctrl+n", text());
     c.put(x, 4, " to start one.", secondary());
   } else {
     int top = 2;

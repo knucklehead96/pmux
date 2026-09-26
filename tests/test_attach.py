@@ -4,12 +4,14 @@ import random
 import time
 import unittest
 
-from helpers import (DETACH, PmuxTestCase, expect_exit, input_corpus_chunks, load_json, probe,
-                     read_file, read_until, wait_until)
+from helpers import (CTRL_BACKSLASH, CTRL_LEFT, CTRL_SHIFT_LEFT, DETACH, PmuxTestCase, expect_exit,
+                     input_corpus_chunks, load_json, probe, read_file, read_until, wait_until)
 
-KITTY_DETACH = b"\x1b[92;5u"
-KITTY_DETACH_PRESS = b"\x1b[92;5:1u"
-KITTY_RELEASE = b"\x1b[92;5:3u"
+# Default detach key: Ctrl+Left.
+KITTY_DETACH_PRESS = b"\x1b[1;5:1D"
+KITTY_REPEAT = b"\x1b[1;5:2D"
+KITTY_RELEASE = b"\x1b[1;5:3D"
+RXVT_DETACH = b"\x1bOd"
 
 
 class AttachCase(PmuxTestCase):
@@ -85,6 +87,8 @@ class OutputTransparency(AttachCase):
 
 
 class DetachKeys(AttachCase):
+    """Default detach key Ctrl+Left: xterm ESC[1;5D, kitty ESC[1;5[:1]D, rxvt ESC O d."""
+
     def _detach_with(self, key):
         log = self.inlog()
         c = self.px.attach("app")
@@ -95,45 +99,55 @@ class DetachKeys(AttachCase):
         self.sync(c, log, seen, b"after")  # no detach bytes reached the app
         self.detach(c, "app")
 
-    def test_ctrl_backslash_byte(self):
-        self._detach_with(DETACH)
+    def test_ctrl_left(self):
+        self._detach_with(CTRL_LEFT)
 
-    def test_kitty_csi_u(self):
-        self._detach_with(KITTY_DETACH)
-
-    def test_kitty_csi_u_press_event(self):
+    def test_kitty_press_event(self):
         self._detach_with(KITTY_DETACH_PRESS)
 
-    def test_split_kitty_sequence(self):
+    def test_rxvt_ctrl_left(self):
+        self._detach_with(RXVT_DETACH)
+
+    def test_split_sequence(self):
         log = self.inlog()
         c = self.px.attach("app")
         # pexpect's default 50 ms delaybeforesend would exceed the hold-back.
         c.delaybeforesend = None
         seen = self.sync(c, log, b"", b"pre")
-        c.send(KITTY_DETACH[:4])      # ESC [ 9 2
+        c.send(CTRL_LEFT[:3])         # ESC [ 1
         # Unavoidable tiny sleep: force two separate reads by the client,
         # well inside the contract's 20 ms hold-back window.
         time.sleep(0.002)
-        c.send(KITTY_DETACH[4:])      # ; 5 u
+        c.send(CTRL_LEFT[3:])         # ; 5 D
         status, sig, out = expect_exit(c, b"[detached from app]")
         self.assertEqual((status, sig), (0, None))
         c = self.px.attach("app")
         self.sync(c, log, seen, b"post")
         self.detach(c, "app")
 
-    def test_release_event_swallowed(self):
+    def test_repeat_and_release_events_swallowed(self):
         log = self.inlog()
         c = self.px.attach("app")
-        c.send(b"a" + KITTY_RELEASE + b"b")
+        c.send(b"a" + KITTY_REPEAT + KITTY_RELEASE + b"b")
         self.wait_log(log, b"ab")
-        self.assertTrue(c.isalive(), "release event must not detach")
+        self.assertTrue(c.isalive(), "repeat / release events must not detach")
         self.sync(c, log, b"ab")
+        self.detach(c, "app")
+
+    def test_ctrl_backslash_reaches_the_app(self):
+        log = self.inlog()
+        c = self.px.attach("app")
+        payload = b"a" + CTRL_BACKSLASH + b"b" + b"\x1b[92;5u" + b"\x1b[27;5;92~" + CTRL_BACKSLASH
+        c.send(payload)
+        self.wait_log(log, payload)
+        self.assertTrue(c.isalive(), "Ctrl+\\ must not detach with the default detach key")
         self.detach(c, "app")
 
     def test_lookalikes_pass_verbatim(self):
         log = self.inlog()
         c = self.px.attach("app")
-        payload = b"\x1b[93;5u" + b"\x1b[92;6u" + b"\x1b[92;3u" + b"\x1b[92u" + b"\x1b[92;5"
+        payload = (b"\x1b[D" + b"\x1b[1;2D" + b"\x1b[1;3D" + b"\x1b[1;5C" + CTRL_SHIFT_LEFT
+                   + b"\x1b[5D" + b"\x1bOD" + b"\x1bOc" + b"\x1b[1;5")
         # The last one is an unterminated prefix; complete it into a
         # non-matching sequence so it must be forwarded as-is.
         payload += b"~" + b"\x1b\\" + b"x"

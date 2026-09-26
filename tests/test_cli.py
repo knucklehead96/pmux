@@ -124,38 +124,41 @@ class CreateTests(PmuxTestCase):
     def test_exited_and_signaled_states(self):
         self.new("ex", "-d", "--", "sh", "-c", "exit 3")
         self.new("sg", "-d", "--", "sh", "-c", "kill -TERM $$")
-        self.px.wait_state("ex", lambda s: s != "running" and s != "idle")
-        self.px.wait_state("sg", lambda s: s != "running" and s != "idle")
+        self.px.wait_state("ex", lambda s: s != "running")
+        self.px.wait_state("sg", lambda s: s != "running")
         self.assertEqual(self.px.entry("ex")["state"], "exited:3")
         self.assertEqual(self.px.entry("sg")["state"], "signaled:15")
 
-    @unittest.skipIf(FAST, "PMUX_FAST=1: skipping >5 s idle test")
-    def test_running_becomes_idle(self):
-        t0 = time.monotonic()
+    @unittest.skipIf(FAST, "PMUX_FAST=1: skipping >5 s silence test")
+    def test_silent_process_stays_running(self):
+        # There is no idle state: STATE is running | exited:N | signaled:N.
         self.new("quiet", "-d", "--", "sleep", "600")
+        deadline = time.monotonic() + 6.5
+        while time.monotonic() < deadline:
+            self.assertEqual(self.px.entry("quiet")["state"], "running")
+            time.sleep(0.5)
         self.assertEqual(self.px.entry("quiet")["state"], "running")
-        self.px.wait_state("quiet", lambda s: s == "idle", timeout=15)
-        elapsed = time.monotonic() - t0
-        self.assertGreaterEqual(elapsed, 4.5, "went idle after only %.1fs" % elapsed)
 
 
 class KillTests(PmuxTestCase):
-    def test_kill_running_then_remove(self):
+    def test_kill_running_removes(self):
         self.assertEqual(self.px.run("-n", "k", "-d", "--", "sleep", "600").returncode, 0)
+        self.assertEqual(self.px.run("-n", "other", "-d", "--", "sleep", "601").returncode, 0)
         pid = int(self.px.entry("k")["pid"])
         p = self.px.run("-k", "k")
         self.assertEqual(p.returncode, 0, p.stderr)
-        # -k returns only after the process exited: no polling here.
+        # -k returns only after the process exited and its entry is gone:
+        # no polling here.
         self.assertFalse(pid_alive(pid), "process still alive after -k returned")
-        self.assertEqual(self.px.entry("k")["state"], "signaled:1", "sleep dies from SIGHUP")
+        self.assertEqual([r["name"] for r in self.px.list()], ["other"],
+                         "-k on a running process must also remove it")
         p = self.px.run("-k", "k")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIsNone(self.px.entry("k"), "second -k on exited process must remove it")
-        self.assertEqual(self.px.list(), [])
+        self.assertEqual(p.returncode, 1, "k is gone: second -k must fail; stderr=%r" % p.stderr)
 
     def test_kill_escalates_to_sigkill(self):
         log = self.px.path("sig.log")
         self.px.create_probe("stubborn", "signals", log)
+        pid = int(self.px.entry("stubborn")["pid"])
         t0 = time.monotonic()
         p = self.px.run("-k", "stubborn", timeout=15)
         elapsed = time.monotonic() - t0
@@ -163,7 +166,19 @@ class KillTests(PmuxTestCase):
         self.assertIn(b"HUP", read_file(log).split(), "SIGHUP must reach the process group first")
         self.assertGreaterEqual(elapsed, 2.5, "SIGKILL came too early (%.2fs)" % elapsed)
         self.assertLess(elapsed, 8, "-k took %.2fs" % elapsed)
-        self.assertEqual(self.px.entry("stubborn")["state"], "signaled:9")
+        self.assertFalse(pid_alive(pid))
+        self.assertIsNone(self.px.entry("stubborn"), "SIGKILLed process must be removed")
+
+    def test_kill_exited_removes(self):
+        for name, script in (("ex", "exit 3"), ("sg", "kill -TERM $$")):
+            self.assertEqual(self.px.run("-n", name, "-d", "--", "sh", "-c", script).returncode, 0)
+            self.px.wait_state(name, lambda s: s != "running")
+        for name in ("ex", "sg"):
+            with self.subTest(name=name):
+                p = self.px.run("-k", name)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIsNone(self.px.entry(name), "-k on an exited process must remove it")
+        self.assertEqual(self.px.list(), [])
 
     def test_unknown_names(self):
         self.assertEqual(self.px.run("-n", "real", "-d", "--", "sleep", "600").returncode, 0)

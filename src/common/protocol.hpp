@@ -17,7 +17,8 @@ namespace pmux {
 //                                                  -> OK(u32 id, str name) | ERROR
 //               (umask: the client's, applied to the process; optional for older clients)
 //   RENAME      u32 id, str name                   -> OK | ERROR
-//   KILL        u32 id  (exited: removes it)       -> OK once the process has exited | ERROR
+//   KILL        u32 id [, u8 remove]               -> OK once the process has exited | ERROR
+//               (exited: removes it; remove = 1: also removes it once it has exited, before OK)
 //   REMOVE      u32 id  (exited processes only)    -> OK | ERROR
 //   ATTACH      u32 id, u16 rows, u16 cols, str client tty path ("" if unknown)
 //                                                  -> OK, SNAPSHOT..., then OUTPUT... | ERROR
@@ -132,13 +133,11 @@ struct ProcInfo {
   std::vector<std::string> argv;
   std::int32_t pid = 0;
   std::uint64_t created_ms = 0;  // unix epoch
-  std::uint64_t idle_ms = 0;     // since last output, or since start if none
   bool exited = false;
   std::int32_t wait_status = 0;
-  std::uint64_t created = 0;      // unix seconds
-  std::uint64_t last_output = 0;  // unix seconds, 0 if none
-  bool bell = false;              // BEL seen since the last attach
-  std::string fg_command;         // foreground process group's argv, joined; empty if unknown
+  std::uint64_t created = 0;  // unix seconds
+  bool bell = false;          // BEL seen since the last attach
+  std::string fg_command;     // foreground process group's argv, joined; empty if unknown
 };
 
 std::vector<std::uint8_t> encode_proc_list(const std::vector<ProcInfo>& procs);

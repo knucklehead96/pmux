@@ -46,6 +46,7 @@ class Server {
     std::vector<std::uint32_t> kill_waiters;
     std::optional<Clock::time_point> kill_deadline;
     std::optional<Clock::time_point> reap_deadline;
+    bool remove_when_exited = false;  // KILL with the remove flag
     std::uint32_t events = 0;  // current epoll interest on the master
   };
 
@@ -80,6 +81,7 @@ class Server {
   void reap_children();
   void finalize(Proc& p);
   void run_timers();
+  void remove_finished();
   int timeout_ms() const;
 
   Client* find_client(std::uint32_t id);

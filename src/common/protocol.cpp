@@ -146,8 +146,8 @@ std::vector<std::uint8_t> encode_proc_list(const std::vector<ProcInfo>& procs) {
   w.u32(static_cast<std::uint32_t>(procs.size()));
   for (const auto& p : procs) {
     w.u32(p.id).str(p.name).str(p.dir).strs(p.argv).i32(p.pid);
-    w.u64(p.created_ms).u64(p.idle_ms).u8(p.exited ? 1 : 0).i32(p.wait_status);
-    w.u64(p.created).u64(p.last_output).u8(p.bell ? 1 : 0).str(p.fg_command);
+    w.u64(p.created_ms).u8(p.exited ? 1 : 0).i32(p.wait_status);
+    w.u64(p.created).u8(p.bell ? 1 : 0).str(p.fg_command);
   }
   return w.take();
 }
@@ -164,11 +164,9 @@ std::optional<std::vector<ProcInfo>> decode_proc_list(const std::vector<std::uin
     p.argv = r.strs();
     p.pid = r.i32();
     p.created_ms = r.u64();
-    p.idle_ms = r.u64();
     p.exited = r.u8() != 0;
     p.wait_status = r.i32();
     p.created = r.u64();
-    p.last_output = r.u64();
     p.bell = r.u8() != 0;
     p.fg_command = r.str();
     procs.push_back(std::move(p));

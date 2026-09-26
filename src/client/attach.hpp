@@ -5,10 +5,12 @@
 #include <string>
 #include <string_view>
 
+#include "common/config.hpp"
+
 namespace pmux {
 
 enum class AttachOutcome {
-  Detached,           // Ctrl+\ or stdin EOF
+  Detached,           // the detach key or stdin EOF
   AttachedElsewhere,  // another client attached
   Exited,             // the process exited; see wait_status
   Lost,               // connection to the daemon lost
@@ -23,11 +25,13 @@ struct AttachResult {
   std::string error;  // for Failed
 };
 
-// Attaches the controlling terminal to a session and runs the passthrough loop until detach
-// or exit. Prints nothing; `prelude` is written to the terminal once the daemon accepted.
+// Attaches the controlling terminal to a session and runs the passthrough loop until the
+// detach key (`key`) or exit. Prints nothing; `prelude` is written to the terminal once the
+// daemon accepted.
 // SIGWINCH, SIGTERM, SIGHUP, SIGINT and SIGQUIT are read through a signalfd meanwhile; other
 // threads must block them (block_attach_signals).
-AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string_view prelude = {});
+AttachResult attach_session(int daemon_fd, std::uint32_t session_id, DetachKey key,
+                            std::string_view prelude = {});
 
 struct ViewResult {
   bool ok = false;
@@ -40,7 +44,7 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id);
 
 // CLI attach: attach_session plus the [detached ...] / [... exited ...] messages on stderr.
 // Returns the exit code for pmux.
-int attach(int daemon_fd, std::uint32_t session_id, const std::string& name);
+int attach(int daemon_fd, std::uint32_t session_id, const std::string& name, DetachKey key);
 
 // Result of scanning one input chunk for the detach key.
 struct InputScan {
@@ -49,14 +53,14 @@ struct InputScan {
   bool detach = false;
 };
 
-// Finds Ctrl+\ (0x1c; kitty CSI 92;<m>[:1]u with Ctrl as the only modifier besides Caps Lock /
-// Num Lock; xterm modifyOtherKeys CSI 27;5;92~) and swallows kitty repeats / releases of it.
-InputScan scan_input(std::string_view input);
+// Finds the detach key and swallows kitty repeats / releases of it. Kitty modifiers count only
+// Ctrl (and Shift for ctrl+shift+left) besides Caps Lock / Num Lock.
+//   ctrl+left:       CSI 1;5D, kitty CSI 1;<m>[:<ev>]D, rxvt ESC O d
+//   ctrl+shift+left: CSI 1;6D, kitty CSI 1;<m>[:<ev>]D
+//   ctrl+backslash:  0x1c, kitty CSI 92;<m>[:<ev>]u, xterm modifyOtherKeys CSI 27;5;92~
+InputScan scan_input(std::string_view input, DetachKey key);
 
 // Blocks the signals attach_session reads in the calling thread; for helper threads.
 void block_attach_signals();
-
-// True if buf contains a detach key; sets `pos` to its offset.
-bool find_detach_key(const char* buf, std::size_t len, std::size_t& pos);
 
 }  // namespace pmux

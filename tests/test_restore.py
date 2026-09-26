@@ -223,7 +223,7 @@ class RestoreCase(TuiCase):
         return t
 
     def detach_pane(self, t, name):
-        t.keys("C-\\")
+        t.keys("C-Left")
         t.wait_dead()
         self.assertEqual(t.dead_status(), 0, "pmux -a exit status after detach\n" + t.describe())
         text = "\n".join(t.history())

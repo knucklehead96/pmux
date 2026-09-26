@@ -9,6 +9,8 @@ namespace pmux {
 
 enum class ThemeMode { Auto, Dark, Light, Ansi };
 enum class Accent { Clay, Blue, Purple, Teal };
+// The one key intercepted while attached: it detaches.
+enum class DetachKey { CtrlLeft, CtrlShiftLeft, CtrlBackslash };
 
 struct Config {
   std::string default_dir;  // expanded; empty if unset
@@ -16,6 +18,7 @@ struct Config {
   ThemeMode theme = ThemeMode::Auto;
   Accent accent = Accent::Clay;
   std::size_t scrollback_lines = 10000;  // 0..100000
+  DetachKey detach_key = DetachKey::CtrlLeft;
 };
 
 // Reads ~/.pmux/config without printing warnings (for the daemon).

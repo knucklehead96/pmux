@@ -47,8 +47,6 @@ class Session {
   // Device number (st_rdev) of the PTY slave; 0 if unknown or the PTY is closed.
   dev_t tty_rdev() const { return master_ ? tty_rdev_ : 0; }
   SystemClock::time_point created() const { return created_; }
-  SteadyClock::time_point last_activity() const { return last_activity_; }
-  std::optional<SystemClock::time_point> last_output() const { return last_output_; }
   bool bell() const { return bell_; }
   void clear_bell() { bell_ = false; }
   void set_name(std::string name) { name_ = std::move(name); }
@@ -93,8 +91,6 @@ class Session {
   dev_t tty_rdev_ = 0;
   std::vector<std::string> argv_;
   SystemClock::time_point created_;
-  SteadyClock::time_point last_activity_;
-  std::optional<SystemClock::time_point> last_output_;
   std::unique_ptr<Screen> screen_;
   bool bell_ = false;
   std::string input_;

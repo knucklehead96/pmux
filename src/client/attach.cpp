@@ -69,24 +69,15 @@ int to_int(std::string_view s) {
 
 enum class KeyKind { Other, Detach, Swallow, Partial };
 
-// Classifies a complete CSI sequence (parameters, final byte). Detach keys: kitty
-// `CSI 92;<m>[:<ev>]u` whose only modifier besides Caps Lock / Num Lock is Ctrl (press or no
-// event type; repeat and release are swallowed) and xterm modifyOtherKeys `CSI 27;5;92~`.
-KeyKind classify_csi(std::string_view params, char final) {
-  if (final == '~') return params == "27;5;92" ? KeyKind::Detach : KeyKind::Other;
-  if (final != 'u') return KeyKind::Other;
-  const std::size_t semi = params.find(';');
-  if (semi == std::string_view::npos) return KeyKind::Other;
-  const std::string_view key = params.substr(0, semi);
-  if (key != "92" && !key.starts_with("92:")) return KeyKind::Other;  // 92:<alternate keys>
-  std::string_view mods = params.substr(semi + 1);
-  mods = mods.substr(0, mods.find(';'));  // drop the associated-text field
+// Classifies kitty modifiers `<m>[:<ev>]`: Detach if the modifier bits besides Caps Lock / Num
+// Lock are exactly `want` (press or no event type); repeat and release are swallowed.
+KeyKind classify_mods(std::string_view mods, int want) {
   const std::size_t colon = mods.find(':');
   const std::string_view m = mods.substr(0, colon);
   const std::string_view ev = colon == std::string_view::npos ? "1" : mods.substr(colon + 1);
   if (!all_digits(m) || !all_digits(ev)) return KeyKind::Other;
   const int bits = to_int(m) - 1;
-  if (bits < 0 || (bits & ~(64 | 128)) != 4) return KeyKind::Other;
+  if (bits < 0 || (bits & ~(64 | 128)) != want) return KeyKind::Other;
   switch (to_int(ev)) {
     case 1: return KeyKind::Detach;
     case 2:
@@ -95,23 +86,56 @@ KeyKind classify_csi(std::string_view params, char final) {
   }
 }
 
+// Kitty modifier bits: Shift 1, Ctrl 4.
+constexpr int kCtrl = 4;
+constexpr int kCtrlShift = 5;
+
+// Classifies a complete CSI sequence (parameters, final byte) for the detach key.
+//   ctrl+left / ctrl+shift+left: `CSI 1;<m>[:<ev>]D` (xterm `CSI 1;5D` / `CSI 1;6D` included).
+//   ctrl+backslash: kitty `CSI 92;<m>[:<ev>]u` and xterm modifyOtherKeys `CSI 27;5;92~`.
+KeyKind classify_csi(std::string_view params, char final, DetachKey key) {
+  if (key != DetachKey::CtrlBackslash) {
+    if (final != 'D' || !params.starts_with("1;")) return KeyKind::Other;
+    return classify_mods(params.substr(2), key == DetachKey::CtrlLeft ? kCtrl : kCtrlShift);
+  }
+  if (final == '~') return params == "27;5;92" ? KeyKind::Detach : KeyKind::Other;
+  if (final != 'u') return KeyKind::Other;
+  const std::size_t semi = params.find(';');
+  if (semi == std::string_view::npos) return KeyKind::Other;
+  const std::string_view code = params.substr(0, semi);
+  if (code != "92" && !code.starts_with("92:")) return KeyKind::Other;  // 92:<alternate keys>
+  std::string_view mods = params.substr(semi + 1);
+  mods = mods.substr(0, mods.find(';'));  // drop the associated-text field
+  return classify_mods(mods, kCtrl);
+}
+
 // True if unfinished CSI parameters may still become a detach or swallowed key.
-bool could_be_key(std::string_view params) {
+bool could_be_key(std::string_view params, DetachKey key) {
+  if (key != DetachKey::CtrlBackslash) {
+    constexpr std::string_view arrow = "1;";
+    return arrow.starts_with(params) || params.starts_with(arrow);
+  }
   constexpr std::string_view kitty = "92", xterm = "27;5;92";
   return kitty.starts_with(params) || xterm.starts_with(params) || params.starts_with("92;") ||
          params.starts_with("92:");
 }
 
 // Classifies the key sequence at the start of `rest` (rest[0] == ESC); sets `len` to its
-// length for Detach / Swallow. Partial: a split sequence that may still become one.
-KeyKind classify_key(std::string_view rest, std::size_t& len) {
+// length for Detach / Swallow. Partial: a split sequence of at least 3 bytes that may still
+// become one (a lone ESC or `ESC [` is never held).
+KeyKind classify_key(std::string_view rest, DetachKey key, std::size_t& len) {
+  if (rest.size() >= 3 && rest[1] == 'O') {  // rxvt Ctrl+Left: ESC O d
+    len = 3;
+    return key == DetachKey::CtrlLeft && rest[2] == 'd' ? KeyKind::Detach : KeyKind::Other;
+  }
   if (rest.size() < 2 || rest[1] != '[') return KeyKind::Other;
   std::size_t i = 2;
   while (i < rest.size() && rest[i] >= 0x30 && rest[i] <= 0x3F) ++i;
   const std::string_view params = rest.substr(2, i - 2);
-  if (i == rest.size()) return rest.size() >= 3 && could_be_key(params) ? KeyKind::Partial : KeyKind::Other;
+  if (i == rest.size())
+    return rest.size() >= 3 && could_be_key(params, key) ? KeyKind::Partial : KeyKind::Other;
   len = i + 1;
-  return classify_csi(params, rest[i]);
+  return classify_csi(params, rest[i], key);
 }
 
 // The list screen (FTXUI) asks for the cursor shape (DECRQSS DECSCUSR) whenever it resumes. If
@@ -163,8 +187,14 @@ enum class Outcome { Detached, AttachedElsewhere, Exited, Lost, Signaled };
 class Passthrough {
  public:
   // `out_fd`: where output goes; non-blocking unless it is stdout itself.
-  Passthrough(int sock, FrameDecoder& decoder, int sig_fd, int out_fd, Clock::time_point filter_until)
-      : sock_(sock), decoder_(decoder), sig_fd_(sig_fd), out_fd_(out_fd), filter_until_(filter_until) {}
+  Passthrough(int sock, FrameDecoder& decoder, int sig_fd, int out_fd, Clock::time_point filter_until,
+              DetachKey key)
+      : sock_(sock),
+        decoder_(decoder),
+        sig_fd_(sig_fd),
+        out_fd_(out_fd),
+        filter_until_(filter_until),
+        key_(key) {}
 
   Outcome run();
   int exit_status() const { return exit_status_; }
@@ -190,6 +220,7 @@ class Passthrough {
   int sig_fd_;
   int out_fd_;
   Clock::time_point filter_until_;
+  DetachKey key_;
   std::string out_;  // output not yet written to the terminal, from out_pos_
   std::size_t out_pos_ = 0;
   std::string held_;
@@ -355,7 +386,7 @@ std::optional<Outcome> Passthrough::read_stdin() {
   input.append(buf, std::size_t(n));
   std::string reply_tail;
   if (Clock::now() < filter_until_) reply_tail = strip_list_replies(input);
-  InputScan scan = scan_input(input);
+  InputScan scan = scan_input(input, key_);
   send_input(scan.forward);
   if (scan.detach) return Outcome::Detached;
   scan.held += reply_tail;
@@ -384,18 +415,18 @@ void block_attach_signals() {
   pthread_sigmask(SIG_BLOCK, &set, nullptr);
 }
 
-InputScan scan_input(std::string_view input) {
+InputScan scan_input(std::string_view input, DetachKey key) {
   InputScan scan;
   std::size_t start = 0;  // first byte not yet copied to `forward`
   for (std::size_t i = 0; i < input.size(); ++i) {
-    if (input[i] == '\x1c') {
+    if (input[i] == '\x1c' && key == DetachKey::CtrlBackslash) {
       scan.forward.append(input.substr(start, i - start));
       scan.detach = true;
       return scan;
     }
     if (input[i] != '\x1b') continue;
     std::size_t len = 0;
-    switch (classify_key(input.substr(i), len)) {
+    switch (classify_key(input.substr(i), key, len)) {
       case KeyKind::Other:
         break;
       case KeyKind::Detach:
@@ -417,18 +448,8 @@ InputScan scan_input(std::string_view input) {
   return scan;
 }
 
-bool find_detach_key(const char* buf, std::size_t len, std::size_t& pos) {
-  const std::string_view input(buf, len);
-  for (pos = 0; pos < len; ++pos) {
-    std::size_t seq_len = 0;
-    if (input[pos] == '\x1c') return true;
-    if (input[pos] == '\x1b' && classify_key(input.substr(pos), seq_len) == KeyKind::Detach) return true;
-  }
-  pos = 0;
-  return false;
-}
-
-AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string_view prelude) {
+AttachResult attach_session(int daemon_fd, std::uint32_t session_id, DetachKey key,
+                            std::string_view prelude) {
   AttachResult result;
   if (!isatty(STDIN_FILENO)) {
     result.error = "stdin is not a terminal";
@@ -474,7 +495,7 @@ AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string
   if (!prelude.empty()) write_all(STDOUT_FILENO, prelude.data(), prelude.size());
 
   Passthrough passthrough(daemon_fd, decoder, sig_fd.get(), out_fd ? out_fd.get() : STDOUT_FILENO,
-                          started + kReplyFilterTime);
+                          started + kReplyFilterTime, key);
   const Outcome outcome = passthrough.run();
   out_fd.reset();
 
@@ -556,8 +577,8 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id) {
   return result;
 }
 
-int attach(int daemon_fd, std::uint32_t session_id, const std::string& name) {
-  const AttachResult r = attach_session(daemon_fd, session_id);
+int attach(int daemon_fd, std::uint32_t session_id, const std::string& name, DetachKey key) {
+  const AttachResult r = attach_session(daemon_fd, session_id, key);
   const int status = r.wait_status;
   switch (r.outcome) {
     case AttachOutcome::Detached:

@@ -51,6 +51,13 @@ std::optional<Accent> parse_accent(std::string_view v) {
   return std::nullopt;
 }
 
+std::optional<DetachKey> parse_detach_key(std::string_view v) {
+  if (v == "ctrl+left") return DetachKey::CtrlLeft;
+  if (v == "ctrl+shift+left") return DetachKey::CtrlShiftLeft;
+  if (v == "ctrl+backslash") return DetachKey::CtrlBackslash;
+  return std::nullopt;
+}
+
 // A decimal integer in [0, max].
 std::optional<std::size_t> parse_count(std::string_view v, std::size_t max) {
   if (v.empty() || v.size() > 9) return std::nullopt;
@@ -178,6 +185,9 @@ Config parse_config(std::string_view text, std::vector<std::string>& warnings) {
       else invalid();
     } else if (key == "scrollback_lines") {
       if (auto n = parse_count(value, 100000)) config.scrollback_lines = *n;
+      else invalid();
+    } else if (key == "detach_key") {
+      if (auto detach = parse_detach_key(value)) config.detach_key = *detach;
       else invalid();
     } else {
       warnings.push_back(where + "unknown key '" + key + "'");

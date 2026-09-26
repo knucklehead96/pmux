@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 
 namespace pmux {
 
@@ -60,6 +61,21 @@ bool check_socket_dir(std::string& error) {
     return false;
   }
   return true;
+}
+
+mode_t current_umask() {
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    if (!line.starts_with("Umask:")) continue;
+    char* end = nullptr;
+    const unsigned long mask = std::strtoul(line.c_str() + 6, &end, 8);
+    if (end != line.c_str() + 6 && mask <= 0777) return static_cast<mode_t>(mask);
+    break;
+  }
+  const mode_t mask = umask(0);
+  umask(mask);
+  return mask;
 }
 
 }  // namespace pmux

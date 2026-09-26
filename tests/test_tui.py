@@ -15,10 +15,10 @@ import pexpect
 
 from helpers import (DETACH, FAST, PROBE, PYTHON, TIMEOUT, PmuxEnv, drain, input_corpus_chunks,
                      pid_alive, probe, read_file, read_until, wait_until)
-from tui import (AGE_RE, DARK, DARK_BG, DIALOG_HINT, FOOTER_EMPTY, FOOTER_FILTER, FOOTER_LIST, FOOTER_RENAME,
-                 LIGHT, TEAL_ACCENT, TmuxTui, TuiCase, blend, color_close, dialog_complete, dump,
-                 list_rows,
-                 row_index, winch_marker)
+from tui import (AGE_RE, DARK, DARK_BG, DIALOG_HINT, FILTER_HINTS, FOOTER_EMPTY,
+                 FOOTER_FILTER, FOOTER_LIST, FOOTER_QUIT, FOOTER_RENAME, FOOTER_TYPE_TO_FILTER,
+                 LIGHT, LIST_HINTS, TEAL_ACCENT, TmuxTui, TuiCase, blend, color_close,
+                 dialog_complete, dump, footer_kill, footer_of, list_rows, row_index, winch_marker)
 
 W = 100
 HOME_KEY = b"\x1b[H"   # xterm Home / End (normal cursor-key mode)
@@ -92,8 +92,9 @@ while True:
         expected = bytes(range(256))
         t.raw(expected)
         t.keys("C-\\", "Enter", "Escape", "Tab", "C-n", "C-r", "C-x", "C-q", "C-c", "BSpace",
-               "Up", "Down", "DC")
-        expected += b"\x1c\r\x1b\t\x0e\x12\x18\x11\x03\x7f\x1b[A\x1b[B\x1b[3~"
+               "Up", "Down", "DC", "C-Left", "C-S-Left", "Left", "C-Right")
+        expected += (b"\x1c\r\x1b\t\x0e\x12\x18\x11\x03\x7f\x1b[A\x1b[B\x1b[3~"
+                     b"\x1b[1;5D\x1b[1;6D\x1b[D\x1b[1;5C")
         t.type("héllo -x ;")
         expected += "héllo -x ;".encode()
         t.click(4, 5)
@@ -169,7 +170,6 @@ class Layout(TuiCase):
         self.new_exited("ex3", "exit 3", cwd=self.web)
         self.new_exited("sig", "kill -TERM $$", cwd=self.web)
         self.new_exited("ok0", "exit 0", cwd=self.web)
-        # Running ones last and quickly: they must still be "running" (<5 s).
         self.new("zed", "sleep", "1000", cwd=self.api)
         self.new("alpha", "cat", cwd=self.api)
         self.new("outside", "sleep", "1001", cwd=self.zzz)
@@ -257,13 +257,13 @@ class Layout(TuiCase):
     def test_empty_state(self):
         t = self.tui()
         lines = t.wait_for(lambda l: l[0] == " ✻ pmux" and l[3] == "   No processes yet."
-                           and l[4] == "   Press ^n to start one." and l[29] == FOOTER_EMPTY,
+                           and l[4] == "   Press ctrl+n to start one." and l[29] == FOOTER_EMPTY,
                            msg="complete empty-state frame")
         d = dump(lines)
         self.assertEqual(lines[0], " ✻ pmux", d)
         self.assertEqual(lines[1:3], ["", ""], d)
         self.assertEqual(lines[3], "   No processes yet.", d)
-        self.assertEqual(lines[4], "   Press ^n to start one.", d)
+        self.assertEqual(lines[4], "   Press ctrl+n to start one.", d)
         self.assertEqual(lines[5:29], [""] * 24, d)
         self.assertEqual(lines[29], FOOTER_EMPTY, d)
         cells = t.cells()
@@ -278,8 +278,47 @@ class Layout(TuiCase):
         self.assertEqual(lines[-1], FOOTER_LIST, dump(lines))
         self.new("p8", "sleep", "1008", cwd=many)
         t.wait_list("p8")
-        t.wait_for(lambda l: l[-1] == FOOTER_LIST + "  type to filter",
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST + FOOTER_TYPE_TO_FILTER,
                    msg="footer with >8 processes")
+        t.type("p")
+        t.wait_for(lambda l: l[-1] == FOOTER_FILTER, msg="no 'type to filter' while filtering")
+
+    def assertWholeHints(self, footer, hints, width, what):
+        """footer drops whole hints from the right: it is the longest prefix
+        of `hints` that leaves room on a `width`-column line."""
+        prefixes = [footer_of(hints[:k]) for k in range(1, len(hints) + 1)]
+        self.assertIn(footer, prefixes, "%s: footer %r is not whole hints of %r"
+                      % (what, footer, hints))
+        k = prefixes.index(footer) + 1
+        self.assertLess(k, len(hints), "%s: full footer cannot fit %d columns" % (what, width))
+        self.assertGreater(len(prefixes[k]), width - 9,
+                           "%s: %r dropped a hint that fits in %d columns" % (what, footer, width))
+
+    def test_footer_drops_whole_hints_when_narrow(self):
+        self.new("a1", "sleep", "1000")
+        for cols in (60, 45):
+            with self.subTest(cols=cols):
+                t = self.start_list("a1", cols=cols)
+                lines = t.wait_for(lambda l: l[-1].startswith(" ↑↓ select"), msg="list footer")
+                time.sleep(0.2)   # let the frame settle
+                self.assertWholeHints(t.footer(), LIST_HINTS, cols, "list at %d cols" % cols)
+                t.type("a")
+                lines = t.wait_for(lambda l: l[2].startswith(" › a"), msg="filter")
+                time.sleep(0.2)
+                self.assertEqual(t.footer(), FOOTER_FILTER, dump(t.screen()))
+                t.close()
+        t = self.start_list("a1", cols=40)
+        t.type("a")
+        t.wait_for(lambda l: l[2].startswith(" › a"), msg="filter")
+        time.sleep(0.2)
+        self.assertWholeHints(t.footer(), FILTER_HINTS, 40, "filter at 40 cols")
+
+    def test_empty_footer_when_narrow(self):
+        t = self.tui(cols=40)
+        lines = t.wait_for("No processes yet.")
+        time.sleep(0.2)
+        self.assertEqual(t.footer(), FOOTER_EMPTY, dump(t.screen()))
+        self.assertEqual(t.screen()[4], "   Press ctrl+n to start one.")
 
     def test_resize(self):
         self.new("a1", "sleep", "1000")
@@ -562,38 +601,127 @@ class Rename(TuiCase):
 
 
 class Kill(TuiCase):
-    CONFIRM = " Kill victim (sleep 1000)?  y yes · n no"
+    """Ctrl+X twice (within 2 s) kills a running process and removes its
+    entry, or removes an exited one; anything else cancels."""
 
-    def test_confirm_no_then_yes(self):
-        self.new("victim", "sleep", "1000")
-        t = self.start_list("victim")
+    def arm(self, t, name, exited=False):
+        """First Ctrl+X: wait for the prompt; check 'kill/remove <name>' is red."""
+        text, red = footer_kill(name, exited)
         t.keys("C-x")
-        lines = t.wait_for(lambda l: l[-1] == self.CONFIRM, msg="kill confirmation footer")
+        lines = t.wait_for(lambda l: l[-1] == text, msg="kill prompt footer")
         f = t.cells()[-1]
-        for c in f[1:5]:
-            self.assertColor(c, self.THEME["error"], "'Kill'")
-            self.assertTrue(c.bold, "'Kill' must be bold: %r" % c)
-        t.type("n")
-        t.wait_for(lambda l: l[-1] == FOOTER_LIST, msg="n cancels")
-        self.assertIn(self.px.entry("victim")["state"], ("running", "idle"))
-        t.keys("C-x")
-        t.wait_for(lambda l: l[-1] == self.CONFIRM, msg="kill confirmation footer (2)")
-        t.type("y")
-        self.px.wait_state("victim", lambda s: s == "signaled:1")
-        lines = t.wait_for(lambda l: any(row_re("○", "victim", "killed (SIGHUP)").match(x) for x in l),
-                           msg="killed row")
-        self.assertColor(t.cells()[3][find_col(lines[3], "killed")], self.THEME["error"], "killed")
+        col = lines[-1].index(red)
+        for c in f[col:col + len(red)]:
+            if c.ch != " ":
+                self.assertColor(c, self.THEME["error"], "%r in the kill prompt" % red)
+        return lines
 
-    def test_kill_exited_removes(self):
+    def assertCancelled(self, t, *procs):
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, msg="kill prompt cancelled")
+        for name, pid in procs:
+            self.assertEqual(self.px.entry(name)["state"], "running", name)
+            self.assertTrue(pid_alive(pid), "%s was killed" % name)
+
+    def running(self, name, cmd="1000"):
+        self.new(name, "sleep", cmd)
+        return name, int(self.px.entry(name)["pid"])
+
+    def test_twice_kills_and_removes(self):
+        victim = self.running("victim")
+        other = self.running("other", "1001")
+        t = self.start_list("victim", "other")
+        self.wait_selected(t, "victim")
+        self.arm(t, "victim")
+        self.assertEqual(self.px.entry("victim")["state"], "running", "first Ctrl+X only asks")
+        t.keys("C-x")
+        lines = t.wait_for(lambda l: "victim" not in names(l), timeout=1.0,
+                           msg="row hidden right after the second Ctrl+X")
+        self.assertIn("other", names(lines), dump(lines))
+        wait_until(lambda: not pid_alive(victim[1]), 5, msg="victim still alive")
+        wait_until(lambda: [r["name"] for r in self.px.list()] == ["other"], 5,
+                   msg=lambda: "victim still listed: %r" % self.px.list())
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, msg="footer restored")
+        self.assertTrue(pid_alive(other[1]))
+        time.sleep(0.5)
+        self.assertEqual(names(t.screen()), ["other"], "the row must not come back")
+
+    def test_sighup_ignoring_process_is_sigkilled_and_removed(self):
+        log = self.px.path("sig.log")
+        self.px.create_probe("stubborn", "signals", log, cwd=self.api)
+        pid = int(self.px.entry("stubborn")["pid"])
+        t = self.start_list("stubborn")
+        self.arm(t, "stubborn")
+        t0 = time.monotonic()
+        t.keys("C-x")
+        t.wait_for(lambda l: "stubborn" not in names(l), timeout=1.0,
+                   msg="row hidden right after the second Ctrl+X")
+        wait_until(lambda: b"HUP" in read_file(log).split(), 2, msg="SIGHUP first")
+        wait_until(lambda: self.px.entry("stubborn") is None, 8,
+                   msg=lambda: "still listed: %r" % self.px.list())
+        self.assertGreaterEqual(time.monotonic() - t0, 2.5, "SIGKILL came too early")
+        self.assertFalse(pid_alive(pid))
+
+    def test_twice_removes_exited(self):
         self.new_exited("gone", "exit 0")
-        self.new("stay", "sleep", "1000")
+        stay = self.running("stay")
         t = self.start_list("gone", "stay")
         self.wait_selected(t, "gone")
+        self.arm(t, "gone", exited=True)
+        self.assertIsNotNone(self.px.entry("gone"), "first Ctrl+X only asks")
         t.keys("C-x")
         wait_until(lambda: [r["name"] for r in self.px.list()] == ["stay"],
                    msg=lambda: "gone not removed; -l=%r\n%s" % (self.px.list(), t.describe()))
         lines = t.wait_for(lambda l: names(l) == ["stay"], msg="row removed")
         self.assertIn(" ~/work/api · 1", lines, dump(lines))
+        self.assertTrue(pid_alive(stay[1]))
+
+    def test_other_key_cancels(self):
+        victim = self.running("victim")
+        t = self.start_list("victim")
+        self.arm(t, "victim")
+        t.keys("Escape")
+        self.assertCancelled(t, victim)
+        # Cancelled: the next Ctrl+X asks again instead of killing.
+        self.arm(t, "victim")
+        time.sleep(0.5)
+        self.assertEqual(self.px.entry("victim")["state"], "running")
+        t.keys("Escape")
+        self.assertCancelled(t, victim)
+
+    def test_selection_change_cancels(self):
+        first = self.running("first")
+        second = self.running("second", "1001")
+        t = self.start_list("first", "second")
+        self.wait_selected(t, "first")
+        self.arm(t, "first")
+        t.keys("Down")
+        self.wait_selected(t, "second")
+        self.assertCancelled(t, first, second)
+        self.arm(t, "second")
+        t.keys("Up")
+        self.assertCancelled(t, first, second)
+
+    def test_timeout_cancels(self):
+        victim = self.running("victim")
+        t = self.start_list("victim")
+        self.arm(t, "victim")
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, timeout=3.5, msg="prompt times out")
+        self.assertCancelled(t, victim)
+        self.arm(t, "victim")
+        time.sleep(0.5)
+        self.assertEqual(self.px.entry("victim")["state"], "running",
+                         "a Ctrl+X after the timeout must only ask again")
+        self.assertTrue(pid_alive(victim[1]))
+
+    def test_no_yes_no_prompt(self):
+        victim = self.running("victim")
+        t = self.start_list("victim")
+        self.arm(t, "victim")
+        t.type("y")   # an ordinary key (it starts a filter): cancels, never confirms
+        t.wait_for(lambda l: l[-1] != footer_kill("victim")[0], msg="y cancels")
+        time.sleep(0.5)
+        self.assertEqual(self.px.entry("victim")["state"], "running", "y must not kill")
+        self.assertTrue(pid_alive(victim[1]))
 
 
 # ===========================================================================
@@ -638,7 +766,7 @@ class Filter(TuiCase):
         t.wait_for(lambda l: names(l) == ["build-watch"], msg="filter 'buil'")
         t.keys("Enter")
         self.wait_attached(t, "build-watch")
-        t.keys("C-\\")
+        t.keys("C-Left")
         t.wait_for(lambda l: "build-watch" in names(l), msg="back to list")
 
 
@@ -647,23 +775,71 @@ class Filter(TuiCase):
 
 
 class Quit(TuiCase):
-    def _quit_with(self, key):
+    """Ctrl+C twice (within 2 s) quits; anything else or a timeout cancels."""
+
+    def start(self):
         self.new("a1", "sleep", "1000")
         t = self.start_list("a1")
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, msg="list footer")
         self.assertEqual(t.modes()[1], "1", "list screen must enable mouse reporting")
-        t.keys(key)
+        return t
+
+    def arm(self, t):
+        t.keys("C-c")
+        t.wait_for(lambda l: l[-1] == FOOTER_QUIT, msg="quit prompt footer")
+
+    def assertQuit(self, t):
         t.wait_dead()
         self.assertEqual(t.dead_status(), 0, t.describe())
         self.assertEqual(t.modes(), ("0", "0"),
                          "alt screen / mouse reporting left enabled after quit")
-        self.assertIn(self.px.entry("a1")["state"], ("running", "idle"))
+        self.assertEqual(self.px.entry("a1")["state"], "running")
         self.assertTrue(pid_alive(self.px.daemon_pid()), "daemon must survive the TUI")
 
-    def test_ctrl_q(self):
-        self._quit_with("C-q")
+    def assertStillUp(self, t, footer=FOOTER_LIST, wait=0.5):
+        time.sleep(wait)
+        self.assertFalse(t.pane_dead(), "TUI quit\n" + t.describe())
+        t.wait_for(lambda l: l[-1] == footer, msg="footer %r" % footer)
 
-    def test_ctrl_c(self):
-        self._quit_with("C-c")
+    def test_ctrl_c_twice(self):
+        t = self.start()
+        self.arm(t)
+        self.assertStillUp(t, FOOTER_QUIT, 0.3)
+        t.keys("C-c")
+        self.assertQuit(t)
+
+    def test_ctrl_c_twice_quickly(self):
+        t = self.start()
+        t.keys("C-c", "C-c")
+        self.assertQuit(t)
+
+    def test_ctrl_q_does_nothing(self):
+        t = self.start()
+        t.keys("C-q")
+        self.assertStillUp(t)
+        t.keys("C-q")
+        self.assertStillUp(t)
+
+    def test_other_key_cancels(self):
+        t = self.start()
+        self.arm(t)
+        t.keys("Escape")
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, msg="other key restores the footer")
+        t.keys("C-c")   # a single Ctrl+C after the cancel only asks again
+        self.assertStillUp(t, FOOTER_QUIT)
+        t.keys("C-c")
+        self.assertQuit(t)
+
+    def test_timeout_cancels(self):
+        t = self.start()
+        self.arm(t)
+        t0 = time.monotonic()
+        t.wait_for(lambda l: l[-1] == FOOTER_LIST, timeout=3.5, msg="quit prompt times out")
+        self.assertGreater(time.monotonic() - t0, 1.0, "prompt vanished too early")
+        t.keys("C-c")
+        self.assertStillUp(t, FOOTER_QUIT)
+        t.keys("C-c")
+        self.assertQuit(t)
 
 
 # ===========================================================================
@@ -686,7 +862,8 @@ class Refresh(TuiCase):
         t = self.start_list("soon")
         t.wait_for(lambda l: any(row_re("○", "soon", "exited (5)").match(x) for x in l),
                    timeout=5, msg="row shows exit")
-        t.wait_for(lambda l: l[0].endswith(" 1 exited"), msg="counts updated")
+        lines = t.wait_for(lambda l: l[0].endswith(" 1 exited"), msg="counts updated")
+        self.assertRegex(lines[0], r"^ ✻ pmux +1 exited$", "zero counts are omitted\n" + dump(lines))
 
     def test_bell(self):
         self.new("ringer", "sh", "-c", BEL_CMD)
@@ -715,21 +892,28 @@ class Refresh(TuiCase):
                    msg="bell row")
         t.keys("Enter")
         t.wait_for(lambda l: not l[0].startswith(" ✻ pmux"), msg="attached")
-        t.keys("C-\\")
+        t.keys("C-Left")
         lines = t.wait_list("ringer")
         lines = t.wait_for(lambda l: row_index(l, "ringer") is not None
                            and "bell" not in l[row_index(l, "ringer")], msg="bell cleared")
         self.assertNotEqual(list_rows(lines)[0][1], "!", dump(lines))
 
-    @unittest.skipIf(FAST, "PMUX_FAST=1: skipping >5 s idle test")
-    def test_idle(self):
+    @unittest.skipIf(FAST, "PMUX_FAST=1: skipping >5 s silence test")
+    def test_silent_process_stays_running(self):
         self.new("quiet", "sleep", "1000")
         t = self.start_list("quiet")
-        lines = t.wait_for(lambda l: re.match(r"^   ◌ quiet {7}  sleep 1000 · idle \d+s +%s$" % AGE_RE,
-                                              l[3] or ""), timeout=12, msg="idle row")
-        self.assertRegex(lines[0], r" 1 idle$", dump(lines))
-        self.assertTrue(t.cells()[3][3].dim or color_close(t.cells()[3][3].fg, self.THEME["secondary"]),
-                        "◌ must be dim")
+        deadline = time.monotonic() + 6.5
+        while time.monotonic() < deadline:
+            lines = t.screen()
+            d = dump(lines)
+            self.assertFalse(any("idle" in l or "◌" in l for l in lines), "no idle state\n" + d)
+            time.sleep(0.25)
+        lines = t.wait_list("quiet")
+        d = dump(lines)
+        self.assertRegex(lines[3], row_re("●", "quiet", "sleep 1000"), d)
+        self.assertRegex(lines[0], r"^ ✻ pmux +1 running$", d)
+        self.assertColor(t.cells()[3][3], self.THEME["running"], "● after >5 s of silence")
+        self.assertEqual(self.px.entry("quiet")["state"], "running")
 
 
 # ===========================================================================
@@ -786,11 +970,13 @@ class TuiPassthrough(TuiCase):
         return c, out
 
     def quit(self, c):
-        c.send(b"\x11")
+        c.send(b"\x03")
+        time.sleep(0.1)
+        c.send(b"\x03")
         try:
             c.expect(pexpect.EOF, timeout=TIMEOUT)
         except pexpect.TIMEOUT:
-            self.fail("TUI did not exit on Ctrl+Q; output tail %r" % c.before[-300:])
+            self.fail("TUI did not exit on Ctrl+C twice; output tail %r" % c.before[-300:])
         return c.before
 
     def test_input_is_byte_exact(self):

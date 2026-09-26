@@ -59,6 +59,18 @@ class Warnings(PmuxTestCase):
         err = self.list_with("accent = pink\n")
         self.assertRegex(err, r"pmux: ~/\.pmux/config:1: .*invalid value for accent")
 
+    def test_detach_key_values_accepted(self):
+        for key in ("ctrl+left", "ctrl+shift+left", "ctrl+backslash"):
+            with self.subTest(key=key):
+                self.assertEqual(self.list_with("detach_key = %s\n" % key), "")
+
+    def test_invalid_detach_key(self):
+        for bad in ("ctrl+q", "ctrl+\\", "C-Left"):
+            with self.subTest(value=bad):
+                err = self.list_with("theme = dark\n\ndetach_key = %s\n" % bad)
+                self.assertEqual(err, "pmux: ~/.pmux/config:3: invalid value for detach_key: '%s'\n"
+                                 % bad)
+
     def test_warnings_do_not_break_create(self):
         self.px.write_config("bogus = 1\n")
         p = self.px.run("-n", "w", "-d", "--", "sleep", "1000")
@@ -86,7 +98,7 @@ class DefaultCmd(PmuxTestCase):
         self.px.write_config("default_cmd = $HOME/bin/mysh\n")
         e = self.create_default("a")
         self.assertEqual(e["command"], self.script)
-        self.assertIn(e["state"], ("running", "idle"))
+        self.assertEqual(e["state"], "running")
 
     def test_tilde_expanded(self):
         self.px.write_config("default_cmd = ~/bin/mysh\n")
@@ -114,7 +126,7 @@ class DefaultDirInTui(TuiCase):
         t.type(name)
         t.keys("Enter")
         e = self.px.wait_state(name, lambda s: True)
-        t.keys("C-\\")
+        t.keys("C-Left")
         return lines, e
 
     def dir_line(self, lines):

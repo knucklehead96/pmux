@@ -15,7 +15,8 @@ the TUI tests.
 Environment variables:
 
 - `PMUX_BIN` — pmux binary under test (default `<repo>/build/pmux`).
-- `PMUX_FAST=1` — skip slow tests (the >5 s running→idle transitions).
+- `PMUX_FAST=1` — skip slow tests (a process silent for >5 s must stay
+  `running`; the Release build + install).
 - `PMUX_TEST_TMPDIR` — parent for per-test temp dirs (default `/tmp`; keep it
   short, the socket paths must fit in 108 bytes).
 
@@ -26,7 +27,11 @@ server).
 
 Files:
 
-- `helpers.py` — `PmuxEnv` fixture, polling, hex diffs, input corpus.
+- `helpers.py` — `PmuxEnv` fixture, polling, hex diffs, detach keys
+  (`DETACH` = the default Ctrl+Left `ESC[1;5D`, `CTRL_SHIFT_LEFT`,
+  `CTRL_BACKSLASH`), the shared input corpus (all 256 bytes incl. 0x1c,
+  key / mouse / paste / kitty sequences; asserted free of any Ctrl+Left
+  detach form).
 - `probe.py` — the app run inside pmux; see its docstring for modes.
   `--winch-mark NAME` prints `[winch:NAME]` on every SIGWINCH, i.e. on
   every attach, which is how TUI tests see that an attach happened.
@@ -35,19 +40,29 @@ Files:
   after an attach comes from pmux's snapshot).
 - `tui.py` — `TmuxTui`: runs `pmux` in a private tmux server
   (`tmux -L <unique> -f /dev/null`, `TMUX_TMPDIR` in the test's temp dir,
-  100x30, `tmux-256color`, `COLORTERM=truecolor`) with `keys()` / `type()` /
+  100x30, `tmux-256color`, `COLORTERM=truecolor`) with `keys()` (`C-Left`
+  sends `ESC[1;5D`, the default detach key) / `type()` /
   `raw()` (exact bytes via `send-keys -H`) / mouse helpers, `screen()` /
   `cells()` (capture-pane with SGR parsed per cell) and `wait_for()`; plus
   theme colors and the `TuiCase` base class.  `fmt()` / `cursor()` /
   `history()` read tmux format flags, the cursor and the full native
-  scrollback; `Cell.key()` includes italic and strikethrough. TUI tests write
+  scrollback; `Cell.key()` includes italic and strikethrough.  Footer
+  constants (`FOOTER_LIST`, `FOOTER_FILTER`, `FOOTER_EMPTY`, `FOOTER_QUIT`,
+  `footer_kill()`) and the hint lists they are built from.  TUI tests write
   `~/.pmux/config` with `theme = dark` unless they test themes.
-- `test_cli.py`, `test_attach.py` — M1.
-- `test_tui.py` — M2 list screen: layout, colors/themes, keys, attach and
-  detach from the list, new/rename/kill dialogs, filter, mouse, refresh
-  (bell/idle/exit), quit and terminal restore, passthrough through the TUI
-  (pexpect). `HarnessSelfTest` validates `tui.py` without pmux.
-- `test_config.py` — M2 config: warnings, `default_cmd`, `default_dir`.
+- `test_cli.py`, `test_attach.py` — M1 (`-l` states running | exited:N |
+  signaled:N; `-k` kills and removes, SIGKILL after 3 s; default detach key
+  Ctrl+Left, Ctrl+\\ reaches the app).
+- `test_tui.py` — M2 list screen: layout, colors/themes, spelled-out key
+  hints (whole hints dropped from the right when narrow, `type to filter`
+  above 8 processes), keys, attach and detach (Ctrl+Left) from the list,
+  new/rename dialogs, kill (Ctrl+X twice: kill + remove, or remove an exited
+  entry; other key / selection change / 2 s timeout cancels), filter, mouse,
+  refresh (bell/exit; no idle state), quit (Ctrl+C twice; other key / 2 s
+  timeout cancels; Ctrl+Q does nothing) and terminal restore, passthrough
+  through the TUI (pexpect). `HarnessSelfTest` validates `tui.py` without pmux.
+- `test_config.py` — M2 config: warnings (incl. `detach_key`),
+  `default_cmd`, `default_dir`.
 - `test_restore.py` — M3: screen/attribute/cursor restore (CLI and TUI),
   output while detached, native scrollback and `scrollback_lines`
   (incl. 0 and invalid values), alt screen, modes, OSC 4/10/11/12 replay and
@@ -69,8 +84,11 @@ Files:
 - `test_regressions_client.py` — client / TUI review fixes: detach while
   output floods a slow terminal, TUI exit when the daemon dies, socket
   directory / owner checks, resizes during a TUI attach, inherited fds,
-  signals while attached (CLI, TUI), detach-key forms (kitty lock
-  modifiers, modifyOtherKeys, split sequences, look-alikes), Home/End
+  signals while attached (CLI, TUI), detach-key forms for every
+  `detach_key` value (Ctrl+Left: kitty lock modifiers / events, rxvt,
+  split sequences, look-alikes; the same for `ctrl+shift+left` and
+  `ctrl+backslash` incl. modifyOtherKeys; an invalid value falls back to
+  Ctrl+Left; the TUI honours the setting), Home/End
   variants, the list screen's late cursor-shape reply, harness style
   carry-over, specific connect errors.
 - `test_regressions_daemon.py` — daemon / screen review fixes: libvterm

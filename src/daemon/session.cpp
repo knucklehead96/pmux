@@ -104,7 +104,6 @@ std::unique_ptr<Session> Session::spawn(std::uint32_t id, const SessionSpec& spe
   }
   s->argv_ = spec.argv;
   s->created_ = SystemClock::now();
-  s->last_activity_ = SteadyClock::now();
   s->screen_ = std::make_unique<Screen>(spec.rows, spec.cols, spec.scrollback_lines);
   return s;
 }
@@ -114,8 +113,6 @@ Session::ReadStatus Session::read_output(std::string& out, bool attached) {
   const ssize_t n = read(master_.get(), buf, sizeof buf);
   if (n > 0) {
     out.assign(buf, std::size_t(n));
-    last_activity_ = SteadyClock::now();
-    last_output_ = SystemClock::now();
     screen_->feed(buf, std::size_t(n));
     if (screen_->take_bell() && !attached) bell_ = true;
     const std::string replies = screen_->take_replies();

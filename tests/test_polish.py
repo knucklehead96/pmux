@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 from helpers import (FAST, PMUX_BIN, REPO_DIR, TIMEOUT, probe, read_file, read_until,
@@ -91,7 +92,7 @@ class FaintRestore(RestoreCase):
         self.assertBytesEqual(corpus, data[start + len(probe.START_MARKER):-len(probe.END_MARKER)],
                               "attached output")
         self.detach(c, "emit")
-        self.assertIn(self.px.entry("emit")["state"], ("running", "idle"), "daemon survived")
+        self.assertEqual(self.px.entry("emit")["state"], "running", "daemon survived")
 
 
 class TypedDuringStartup(TuiCase):
@@ -119,7 +120,7 @@ class SelfAttach(TuiCase):
         wait_until(lambda: read_file(rc).strip(), msg="nested pmux -a never returned")
         self.assertEqual(read_file(rc).strip(), b"1")
         self.assertEqual(read_file(err), b"pmux: cannot attach self to itself\n")
-        self.assertIn(self.px.entry("self")["state"], ("running", "idle"), "process unaffected")
+        self.assertEqual(self.px.entry("self")["state"], "running", "process unaffected")
 
     def test_nested_attach_to_other_process_allowed(self):
         self.marker("target")
@@ -139,7 +140,7 @@ class SelfAttach(TuiCase):
         self.assertTrue(lines[0].startswith(" ✻ pmux"), dump(lines))
         foot = t.cells()[-1]
         self.assertTrue(color_close(foot[1].fg, DARK["error"]), "note must be red: %r" % foot[1])
-        t.keys("C-\\")
+        t.keys("C-Left")
         t.wait_dead()
         self.assertEqual(t.dead_status(), 0, t.describe())
 
@@ -148,7 +149,7 @@ class TooSmall(TuiCase):
     def small(self, lines, rows, cols):
         y = (rows - 2) // 2
         self.assertEqual(lines[y], " " * ((cols - 18) // 2) + "Terminal too small", dump(lines))
-        self.assertEqual(lines[y + 1], " " * ((cols - 7) // 2) + "^q quit", dump(lines))
+        self.assertEqual(lines[y + 1], " " * ((cols - 11) // 2) + "ctrl+c quit", dump(lines))
         self.assertEqual([l for i, l in enumerate(lines) if l and i not in (y, y + 1)], [],
                          dump(lines))
 
@@ -158,11 +159,15 @@ class TooSmall(TuiCase):
         self.small(t.wait_for("Terminal too small"), 6, 30)
         t.keys("C-n")
         t.type("x")
-        t.keys("C-x")
+        t.keys("C-x", "C-x")
+        t.keys("C-q")
+        time.sleep(0.3)
+        self.assertFalse(t.pane_dead(), "Ctrl+Q must not quit\n" + t.describe())
         t.resize(30, 100)
         lines = t.wait_list("proc")
-        self.assertFalse(any("New process" in l or "› x" in l or "Kill" in l for l in lines),
+        self.assertFalse(any("New process" in l or "› x" in l or "press ctrl+x" in l for l in lines),
                          "keys must be ignored while too small\n" + dump(lines))
+        self.assertEqual(self.px.entry("proc")["state"], "running", "Ctrl+X twice while too small")
         t.resize(20, 39)
         self.small(t.wait_for("Terminal too small"), 20, 39)
         t.resize(7, 80)
@@ -171,9 +176,13 @@ class TooSmall(TuiCase):
         t.wait_list("proc")
         t.resize(6, 30)
         t.wait_for("Terminal too small")
-        t.keys("C-q")
+        t.keys("C-c")
+        time.sleep(0.3)
+        self.assertFalse(t.pane_dead(), "a single Ctrl+C must not quit\n" + t.describe())
+        t.keys("C-c")
         t.wait_dead()
         self.assertEqual(t.dead_status(), 0, t.describe())
+        self.assertEqual(t.modes(), ("0", "0"), "terminal not restored")
 
 
 @unittest.skipIf(FAST, "slow (PMUX_FAST=1)")

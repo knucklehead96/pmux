@@ -152,6 +152,7 @@ int Server::run() {
       }
     }
     run_timers();
+    remove_finished();
     close_dead_clients();
   }
   return 0;
@@ -227,7 +228,6 @@ void Server::handle_frame(Client& c, const Frame& frame) {
 }
 
 void Server::do_list(Client& c) {
-  const auto now = Clock::now();
   std::vector<ProcInfo> list;
   for (const auto& [id, p] : procs_) {
     const Session& s = *p.session;
@@ -239,15 +239,10 @@ void Server::do_list(Client& c) {
     info.pid = s.pid();
     info.created_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(s.created().time_since_epoch()).count());
-    info.idle_ms = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - s.last_activity()).count());
     info.exited = s.exited();
     info.wait_status = s.exit_status();
     info.created = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::seconds>(s.created().time_since_epoch()).count());
-    if (const auto out = s.last_output())
-      info.last_output = static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::seconds>(out->time_since_epoch()).count());
     info.bell = s.bell();
     info.fg_command = s.fg_command();
     list.push_back(std::move(info));
@@ -397,12 +392,14 @@ void Server::do_input(Client& c, const Frame& frame) {
 void Server::do_kill(Client& c, const Frame& frame) {
   PayloadReader r(frame.payload);
   const std::uint32_t id = r.u32();
+  const bool remove = !r.at_end() && r.u8() != 0;  // optional for older clients
   Proc* p = r.ok() ? find_proc(id) : nullptr;
   if (!p) return send(c, error_frame("no such process"));
   if (p->session->exited()) {
     procs_.erase(id);
     return send(c, ok_frame());
   }
+  if (remove) p->remove_when_exited = true;
   p->kill_waiters.push_back(c.id);
   if (!p->kill_deadline && !p->session->reaped()) {
     p->session->hangup();
@@ -560,8 +557,18 @@ void Server::finalize(Proc& p) {
                         PayloadWriter().i32(s.exit_status()).str(s.screen().color_resets()).take()));
   }
   p.attached = 0;
+  // With the remove flag, remove_finished drops the entry at the end of this event pass, before
+  // any later request (from these waiters or anyone else) is handled.
   for (std::uint32_t cid : std::exchange(p.kill_waiters, {}))
     if (Client* c = find_client(cid)) send(*c, ok_frame());
+}
+
+// Drops exited processes killed with the remove flag. Runs after each event pass, outside the
+// loops over procs_ that finalize them.
+void Server::remove_finished() {
+  std::erase_if(procs_, [](const auto& entry) {
+    return entry.second.remove_when_exited && entry.second.session->exited();
+  });
 }
 
 void Server::run_timers() {

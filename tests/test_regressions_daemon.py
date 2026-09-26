@@ -136,7 +136,8 @@ class Conn:
         for _ in range(r.take("I")):
             p = {"id": r.take("I"), "name": r.str().decode(), "dir": r.str(), "argv": r.strs(),
                  "pid": r.take("i")}
-            r.take("Q"), r.take("Q"), r.take("B"), r.take("i"), r.take("Q"), r.take("Q"), r.take("B")
+            # created_ms, exited, wait_status, created, bell (no idle / last-output fields)
+            r.take("Q"), r.take("B"), r.take("i"), r.take("Q"), r.take("B")
             p["fg_command"] = r.str()
             out.append(p)
         return out
@@ -154,7 +155,7 @@ class ScreenCrashes(PmuxTestCase):
         self.assertEqual(self.px.daemon_pid(), pid)
         e = self.px.entry(other)
         self.assertIsNotNone(e, "session %s lost" % other)
-        self.assertIn(e["state"], ("running", "idle"))
+        self.assertEqual(e["state"], "running")
 
     def other_session(self):
         log = self.px.path("other.in")
@@ -510,7 +511,7 @@ class AttachLoop(TuiCase):
         used = cpu_ticks(daemon) - before
         self.assertLess(used, 20, "daemon used %d ticks in 1 s" % used)
         for n in names:
-            self.assertIn(self.px.entry(n)["state"], ("running", "idle"), n)
+            self.assertEqual(self.px.entry(n)["state"], "running", n)
 
     def test_two_process_loop_refused(self):
         self.chain(["y", "x"])
@@ -626,7 +627,7 @@ class DaemonHousekeeping(PmuxTestCase):
         self.assertTrue(pid_alive(pid))
         rss_kb = int(proc_status(pid)["VmRSS"].split()[0])
         self.assertLess(rss_kb, 150 * 1024, "daemon RSS %d kB" % rss_kb)
-        self.assertIn(self.px.entry("sl")["state"], ("running", "idle"))
+        self.assertEqual(self.px.entry("sl")["state"], "running")
 
     def test_output_queue_bounded(self):
         big = ["a" * 100000] * 4  # ~400 kB per LIST reply
@@ -656,7 +657,7 @@ class DaemonHousekeeping(PmuxTestCase):
         self.assertTrue(eof, "daemon kept a client that does not read (%d bytes received)" % received)
         self.assertLess(received, 100 << 20)
         self.assertTrue(pid_alive(pid))
-        self.assertIn(self.px.entry("big")["state"], ("running", "idle"))
+        self.assertEqual(self.px.entry("big")["state"], "running")
 
     def test_runaway_csi_bounded(self):
         size = 48 << 20

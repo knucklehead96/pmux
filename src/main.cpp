@@ -16,6 +16,7 @@
 #include "client/connect.hpp"
 #include "client/tui.hpp"
 #include "common/config.hpp"
+#include "common/paths.hpp"
 #include "common/protocol.hpp"
 #include "daemon/server.hpp"
 
@@ -31,7 +32,7 @@ constexpr const char* kUsage =
     "                                          and attach (-d: stay detached)\n"
     "       pmux -l                            list processes\n"
     "       pmux -a <name>                     attach to a process\n"
-    "       pmux -k <name>                     kill a process (remove it if exited)\n"
+    "       pmux -k <name>                     kill and remove a process\n"
     "       pmux --daemon                      run the daemon in the foreground\n"
     "       pmux -h | --help                   show this help\n";
 
@@ -112,7 +113,7 @@ std::string state_string(const ProcInfo& p) {
     if (WIFSIGNALED(p.wait_status)) return "signaled:" + std::to_string(WTERMSIG(p.wait_status));
     return "exited:" + std::to_string(WEXITSTATUS(p.wait_status));
   }
-  return p.idle_ms < 5000 ? "running" : "idle";
+  return "running";
 }
 
 std::string join(const std::vector<std::string>& v) {
@@ -179,9 +180,8 @@ int cmd_new(const Options& o, const Config& config) {
   UniqueFd fd = connect_or_report();
   if (!fd) return 1;
   PayloadWriter w;
-  const mode_t mask = umask(0);
-  umask(mask);
-  w.str(o.name).str(current_dir()).strs(argv).strs(current_env()).u16(rows).u16(cols).u32(mask);
+  w.str(o.name).str(current_dir()).strs(argv).strs(current_env()).u16(rows).u16(cols);
+  w.u32(current_umask());
   auto reply = request(fd.get(), make_frame(MsgType::New, w.take()));
   if (!reply || reply->type != MsgType::Ok) return report_failure(reply);
 
@@ -189,7 +189,7 @@ int cmd_new(const Options& o, const Config& config) {
   const std::uint32_t id = r.u32();
   const std::string name = r.str();
   if (o.detached) return 0;
-  return attach(fd.get(), id, name);
+  return attach(fd.get(), id, name, config.detach_key);
 }
 
 int cmd_list() {
@@ -203,7 +203,7 @@ int cmd_list() {
   return 0;
 }
 
-int cmd_attach(const Options& o) {
+int cmd_attach(const Options& o, const Config& config) {
   UniqueFd fd = connect_or_report();
   if (!fd) return 1;
   auto proc = lookup(fd.get(), o.name);
@@ -212,7 +212,7 @@ int cmd_attach(const Options& o) {
     std::fprintf(stderr, "pmux: %s has exited\n", proc->name.c_str());
     return 1;
   }
-  return attach(fd.get(), proc->id, proc->name);
+  return attach(fd.get(), proc->id, proc->name, config.detach_key);
 }
 
 int cmd_kill(const Options& o) {
@@ -220,7 +220,8 @@ int cmd_kill(const Options& o) {
   if (!fd) return 1;
   auto proc = lookup(fd.get(), o.name);
   if (!proc) return 1;
-  auto reply = request(fd.get(), make_frame(MsgType::Kill, PayloadWriter().u32(proc->id).take()),
+  // Remove when exited: the reply comes once the process has exited and its entry is gone.
+  auto reply = request(fd.get(), make_frame(MsgType::Kill, PayloadWriter().u32(proc->id).u8(1).take()),
                        kKillTimeoutMs);
   if (!reply || reply->type != MsgType::Ok) return report_failure(reply);
   return 0;
@@ -245,7 +246,7 @@ int main(int argc, char** argv) {
     case Mode::Tui: return run_tui(config, current_dir());
     case Mode::New: return cmd_new(*options, config);
     case Mode::List: return cmd_list();
-    case Mode::Attach: return cmd_attach(*options);
+    case Mode::Attach: return cmd_attach(*options, config);
     case Mode::Kill: return cmd_kill(*options);
     case Mode::Daemon: return run_daemon();
     case Mode::Help: std::fputs(kUsage, stdout); return 0;

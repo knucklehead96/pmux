@@ -8,6 +8,7 @@ XDG_RUNTIME_DIR in /proc/<pid>/environ, then removes the temp dir.
 """
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -31,7 +32,11 @@ TIMEOUT = 10.0
 sys.path.insert(0, TESTS_DIR)
 import probe  # noqa: E402  (re-exported markers / terminator)
 
-DETACH = b"\x1c"
+# Detach keys (config `detach_key`).  DETACH is the default, Ctrl+Left.
+CTRL_LEFT = b"\x1b[1;5D"
+CTRL_SHIFT_LEFT = b"\x1b[1;6D"
+CTRL_BACKSLASH = b"\x1c"
+DETACH = CTRL_LEFT
 
 
 # --------------------------------------------------------------------------
@@ -374,12 +379,15 @@ def expect_exit(child, message, timeout=TIMEOUT):
     return child.exitstatus, child.signalstatus, out
 
 
-# Input corpus for passthrough tests: every byte except Ctrl+\ (0x1c) plus
-# common key / mouse / paste / focus / kitty sequences.
+# Input corpus for passthrough tests (default detach key Ctrl+Left): every
+# byte, including Ctrl+\\ (0x1c, it reaches the app unless detach_key =
+# ctrl+backslash), plus common key / mouse / paste / focus / kitty sequences
+# and Ctrl+Left look-alikes.  It must never contain a Ctrl+Left detach form.
 INPUT_SEQS = [
     b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D",
     b"\x1bOA", b"\x1bOB", b"\x1bOC", b"\x1bOD",
     b"\x1b[1;5C", b"\x1b[H", b"\x1b[F", b"\x1b[3~",
+    b"\x1b[1;2D", b"\x1b[1;3D", b"\x1b[1;6D", b"\x1b[1;7D", b"\x1b[5D", b"\x1bOc",
     b"\x1bOP", b"\x1bOQ", b"\x1bOR", b"\x1bOS",
     b"\x1b[15~", b"\x1b[17~", b"\x1b[18~", b"\x1b[19~",
     b"\x1b[20~", b"\x1b[21~", b"\x1b[23~", b"\x1b[24~",
@@ -389,14 +397,29 @@ INPUT_SEQS = [
     b"\x1b[I", b"\x1b[O",
     b"\x1b[97;5u", b"\x1b[97;5:1u", b"\x1b[97;5:3u",
     b"\x1b[92u", b"\x1b[92;1u",
+    # Ctrl+\\ forms: only intercepted with detach_key = ctrl+backslash.
+    b"\x1c", b"\x1b[92;5u", b"\x1b[92;69:1u", b"\x1b[27;5;92~",
     "h\u00e9llo \u20ac\U0001F600".encode(),
 ]
+
+# Any Ctrl+Left detach form: ESC [ 1 ; m [:ev] D with ((m-1) & ~(64|128)) == 4,
+# or rxvt ESC O d.
+_CTRL_LEFT_RE = re.compile(rb"\x1b\[1;(\d+)(?::\d+)?D|\x1bOd")
+
+
+def contains_ctrl_left(data):
+    for m in _CTRL_LEFT_RE.finditer(data):
+        if m.group(1) is None or ((int(m.group(1)) - 1) & ~(64 | 128)) == 4:
+            return True
+    return False
 
 
 def input_corpus_chunks():
     """Chunks to send one by one; their concatenation is the expected log."""
-    all_bytes = bytes(b for b in range(256) if b != 0x1C)
-    return [all_bytes[i:i + 37] for i in range(0, len(all_bytes), 37)] + list(INPUT_SEQS)
+    all_bytes = bytes(range(256))
+    chunks = [all_bytes[i:i + 37] for i in range(0, len(all_bytes), 37)] + list(INPUT_SEQS)
+    assert not contains_ctrl_left(b"".join(chunks)), "corpus contains the detach key"
+    return chunks
 
 
 class PmuxTestCase(unittest.TestCase):
