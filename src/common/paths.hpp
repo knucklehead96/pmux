@@ -12,4 +12,8 @@ std::string pid_path();
 // Creates socket_dir() with mode 0700 if needed and checks its ownership.
 bool ensure_socket_dir(std::string& error);
 
+// Client side: false (with `error`) if socket_dir() exists but is not a directory owned by the
+// current user without group / other permissions. A missing directory is fine.
+bool check_socket_dir(std::string& error);
+
 }  // namespace pmux

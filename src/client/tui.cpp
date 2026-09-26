@@ -503,6 +503,7 @@ struct Poller {
   bool stop = false;
   bool paused = false;  // while attached: FTXUI is uninstalled, don't post
   bool wake = false;
+  bool lost = false;  // the daemon cannot be reached any more
   std::optional<std::vector<ProcInfo>> latest;
   ftxui::ScreenInteractive* screen = nullptr;
 
@@ -515,6 +516,7 @@ struct Poller {
   }
 
   void run() {
+    block_attach_signals();
     UniqueFd fd;
     for (;;) {
       {
@@ -526,10 +528,19 @@ struct Poller {
       }
       if (!fd) fd = connect_daemon();
       auto list = fetch_list(fd.get());
-      if (!list) fd.reset();
+      bool connected = true;
+      if (!list) {
+        fd = connect_daemon();  // retry once on a fresh connection
+        if (fd) list = fetch_list(fd.get());
+        if (!list) {
+          connected = static_cast<bool>(fd);
+          fd.reset();
+        }
+      }
       std::lock_guard lock(m);
       if (stop) return;
       if (list) latest = std::move(list);
+      if (!connected) lost = true;
       if (!paused) screen->PostEvent(Event::Custom);
     }
   }
@@ -585,6 +596,9 @@ class Tui {
   bool on_event(const Event& event);
   // Events to handle before the first one FTXUI delivers (keys typed during startup).
   void set_pending(std::vector<Event> events) { pending_ = std::move(events); }
+  // After the loop ended: pmux's exit code and an error to print (if any).
+  int exit_code() const { return exit_code_; }
+  const std::string& exit_error() const { return exit_error_; }
 
  private:
   bool handle_event(const Event& event);
@@ -670,6 +684,8 @@ class Tui {
   SteadyClock::time_point last_click_;
 
   std::vector<Event> pending_;
+  int exit_code_ = 0;
+  std::string exit_error_;
 };
 
 const ProcInfo* Tui::find(std::uint32_t id) const {
@@ -769,9 +785,10 @@ void Tui::note(std::string text, bool error, SteadyClock::duration d) {
 void Tui::attach_to(const ProcInfo& proc, bool via_mouse) {
   const std::uint32_t id = proc.id;
   const std::string name = proc.name;
-  UniqueFd fd = connect_daemon();
+  std::string error;
+  UniqueFd fd = connect_daemon(&error);
   if (!fd) {
-    note("cannot connect to daemon", true, kLongNote);
+    note(error, true, kLongNote);
     return;
   }
   {
@@ -794,6 +811,11 @@ void Tui::attach_to(const ProcInfo& proc, bool via_mouse) {
   fd.reset();
 
   note_.reset();
+  if (result.outcome == AttachOutcome::Signaled) {
+    exit_code_ = 128 + result.signal;
+    quit();
+    return;
+  }
   switch (result.outcome) {
     case AttachOutcome::Detached: break;
     case AttachOutcome::AttachedElsewhere:
@@ -809,6 +831,7 @@ void Tui::attach_to(const ProcInfo& proc, bool via_mouse) {
     }
     case AttachOutcome::Lost: note("lost connection to daemon", true, kLongNote); break;
     case AttachOutcome::Failed: note(result.error, true, kLongNote); break;
+    case AttachOutcome::Signaled: break;
   }
   selected_ = id;
   refresh_now();
@@ -826,9 +849,10 @@ void Tui::attach_selected(bool via_mouse) {
 
 void Tui::view_exited(const ProcInfo& proc, bool via_mouse) {
   const std::uint32_t id = proc.id;
-  UniqueFd fd = connect_daemon();
+  std::string error;
+  UniqueFd fd = connect_daemon(&error);
   if (!fd) {
-    note("cannot connect to daemon", true, kLongNote);
+    note(error, true, kLongNote);
     return;
   }
   {
@@ -945,6 +969,7 @@ void Tui::confirm_kill() {
   mode_ = Mode::List;
   const std::uint32_t id = kill_id_;
   std::thread([id, poller = poller_] {
+    block_attach_signals();
     UniqueFd fd = connect_daemon();
     request(fd.get(), make_frame(MsgType::Kill, PayloadWriter().u32(id).take()), kKillTimeoutMs);
     poller->request_refresh();
@@ -960,9 +985,17 @@ bool Tui::on_event(const Event& event) {
 bool Tui::handle_event(const Event& event) {
   if (event == Event::Custom) {
     std::optional<std::vector<ProcInfo>> list;
+    bool lost = false;
     {
       std::lock_guard lock(poller_->m);
       list = std::exchange(poller_->latest, std::nullopt);
+      lost = poller_->lost;
+    }
+    if (lost) {
+      exit_code_ = 1;
+      exit_error_ = "lost connection to daemon";
+      quit();
+      return true;
     }
     if (list) set_procs(std::move(*list));
     return true;
@@ -990,8 +1023,9 @@ bool Tui::on_list_event(const Event& e) {
   else if (e == Event::ArrowDown) select_index(index + 1);
   else if (e == Event::PageUp) select_index(index - page);
   else if (e == Event::PageDown) select_index(index + page);
-  else if (e == Event::Home) select_index(0);
-  else if (e == Event::End) select_index(int(order_.size()) - 1);
+  else if (e == Event::Home || e == Event::Special("\x1b[1~") || e == Event::Special("\x1b[7~")) select_index(0);
+  else if (e == Event::End || e == Event::Special("\x1b[4~") || e == Event::Special("\x1b[8~"))
+    select_index(int(order_.size()) - 1);
   else if (e == Event::Return) attach_selected(false);
   else if (e == Event::CtrlN) open_dialog();
   else if (e == Event::CtrlR) start_rename();
@@ -1366,9 +1400,10 @@ int run_tui(const Config& config, const std::string& launch_dir) {
     std::fprintf(stderr, "pmux: the process list needs a terminal (stdin and stdout must be a tty)\n");
     return 1;
   }
-  UniqueFd ctl = connect_or_spawn_daemon();
+  std::string error;
+  UniqueFd ctl = connect_or_spawn_daemon(&error);
   if (!ctl) {
-    std::fprintf(stderr, "pmux: cannot connect to daemon\n");
+    std::fprintf(stderr, "pmux: %s\n", error.c_str());
     return 1;
   }
   auto initial = fetch_list(ctl.get());
@@ -1412,7 +1447,8 @@ int run_tui(const Config& config, const std::string& launch_dir) {
   }
   poller->cv.notify_all();
   worker.join();
-  return 0;
+  if (!tui.exit_error().empty()) std::fprintf(stderr, "pmux: %s\n", tui.exit_error().c_str());
+  return tui.exit_code();
 }
 
 }  // namespace pmux

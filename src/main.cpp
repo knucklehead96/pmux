@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -124,8 +125,9 @@ std::string join(const std::vector<std::string>& v) {
 }
 
 UniqueFd connect_or_report() {
-  UniqueFd fd = connect_or_spawn_daemon();
-  if (!fd) std::fprintf(stderr, "pmux: cannot connect to daemon\n");
+  std::string error;
+  UniqueFd fd = connect_or_spawn_daemon(&error);
+  if (!fd) std::fprintf(stderr, "pmux: %s\n", error.c_str());
   return fd;
 }
 
@@ -227,6 +229,9 @@ int cmd_kill(const Options& o) {
 
 int main(int argc, char** argv) {
   using namespace pmux;
+  // A daemon that went away must show up as a failed write, not kill the client (with the
+  // terminal still in raw mode). Sessions reset it before exec.
+  signal(SIGPIPE, SIG_IGN);
   const auto options = parse_args(argc, argv);
   if (!options) {
     std::fputs(kUsage, stderr);

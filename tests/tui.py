@@ -211,10 +211,15 @@ def _apply_sgr(st, params):
 _ESC_RE = re.compile(r"\x1b(?:\[([0-9;:?]*)([A-Za-z])|\][^\x07\x1b]*(?:\x07|\x1b\\)|.)")
 
 
-def parse_ansi_line(line):
+def parse_ansi_line(line, st=None):
     """Parse one capture-pane -e line into a list of Cells (one per column;
-    all pmux glyphs are single-width)."""
-    st = _default_state()
+    all pmux glyphs are single-width).
+
+    capture-pane -e does not reset the style at line starts: it only emits
+    changes, so the style in effect at the end of one line carries into the
+    next.  Pass the same `st` dict (updated in place) for consecutive lines
+    of one capture; see parse_ansi_lines()."""
+    st = _default_state() if st is None else st
     cells = []
     pos = 0
     for m in _ESC_RE.finditer(line):
@@ -226,6 +231,13 @@ def parse_ansi_line(line):
     for ch in line[pos:]:
         cells.append(Cell(ch, st))
     return cells
+
+
+def parse_ansi_lines(lines):
+    """Parse all lines of one capture-pane -e output, carrying one SGR state
+    across the lines."""
+    st = _default_state()
+    return [parse_ansi_line(l, st) for l in lines]
 
 
 def color_close(a, b, tol=1):
@@ -391,7 +403,7 @@ class TmuxTui:
         return self._capture("-e")
 
     def cells(self):
-        return [parse_ansi_line(l) for l in self.screen_ansi()]
+        return parse_ansi_lines(self.screen_ansi())
 
     def describe(self, lines=None):
         lines = self.screen() if lines is None else lines
