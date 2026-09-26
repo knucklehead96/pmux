@@ -65,7 +65,9 @@ class Session {
   bool has_pending_input() const { return !input_.empty(); }
   std::size_t pending_input() const { return input_.size(); }
 
-  void resize(int rows, int cols);
+  // Sets the PTY size (the kernel sends SIGWINCH if it changed) and the screen's. True if the
+  // PTY size changed.
+  bool resize(int rows, int cols);
   void notify_winch();
   void hangup();
   void force_kill();

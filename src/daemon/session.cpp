@@ -175,15 +175,19 @@ void Session::flush_input() {
   }
 }
 
-void Session::resize(int rows, int cols) {
-  if (!master_ || rows <= 0 || cols <= 0) return;
+bool Session::resize(int rows, int cols) {
+  if (!master_ || rows <= 0 || cols <= 0) return false;
   rows = std::min(rows, Screen::kMaxRows);
   cols = std::min(cols, Screen::kMaxCols);
   winsize ws{};
   ws.ws_row = static_cast<unsigned short>(rows);
   ws.ws_col = static_cast<unsigned short>(cols);
-  ioctl(master_.get(), TIOCSWINSZ, &ws);
+  winsize old{};
+  const bool changed = ioctl(master_.get(), TIOCGWINSZ, &old) != 0 || old.ws_row != ws.ws_row ||
+                       old.ws_col != ws.ws_col || old.ws_xpixel != 0 || old.ws_ypixel != 0;
+  const bool set = ioctl(master_.get(), TIOCSWINSZ, &ws) == 0;
   screen_->resize(rows, cols);
+  return changed && set;
 }
 
 void Session::notify_winch() {

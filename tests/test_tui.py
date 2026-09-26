@@ -837,7 +837,9 @@ class TuiPassthrough(TuiCase):
         # emission.  Extra SIGWINCH emissions are tolerated.
         time.sleep(1.5)
         full = probe.START_MARKER + corpus + probe.END_MARKER
-        gap = drain(c)
+        # Bytes read past the END marker were pushed back into c.buffer.
+        gap = c.buffer + drain(c)
+        c.buffer = b""
         while gap.startswith(full):
             gap = gap[len(full):]
         self.assertBytesEqual(b"", gap, "client output while attached and idle")

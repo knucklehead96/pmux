@@ -339,12 +339,12 @@ void Server::do_attach(Client& c, const Frame& frame) {
   c.attached = id;
   p->session->clear_bell();
   send(c, ok_frame());
-  // Reflow to the client size and snapshot first; then resize the PTY and signal back to back
-  // so the kernel's SIGWINCH (size change) and ours reach the app together.
+  // Resize the screen to the client size and snapshot first; then resize the PTY. The app gets
+  // exactly one SIGWINCH: the kernel's if the size changed, else ours. (Both would reach it as
+  // one or two signals depending on timing.)
   p->session->screen().resize(rows, cols);
   send_snapshot(c, p->session->screen().snapshot(true));
-  p->session->resize(rows, cols);
-  p->session->notify_winch();
+  if (!p->session->resize(rows, cols)) p->session->notify_winch();
   update_master_events(*p);
 }
 
