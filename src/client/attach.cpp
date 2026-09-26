@@ -268,7 +268,8 @@ AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string
   Winsize ws = terminal_size(STDIN_FILENO);
   if (ws.rows == 0 || ws.cols == 0) ws = {24, 80};
   FrameDecoder decoder;
-  const auto request = PayloadWriter().u32(session_id).u16(ws.rows).u16(ws.cols).take();
+  const char* tty = ttyname(STDIN_FILENO);
+  const auto request = PayloadWriter().u32(session_id).u16(ws.rows).u16(ws.cols).str(tty ? tty : "").take();
   std::optional<Frame> reply;
   if (send_frame(daemon_fd, make_frame(MsgType::Attach, request)))
     reply = recv_frame(daemon_fd, decoder, 5000);

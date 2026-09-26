@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -91,6 +92,7 @@ std::unique_ptr<Session> Session::spawn(std::uint32_t id, const SessionSpec& spe
   s->pid_ = pid;
   s->name_ = spec.name;
   s->dir_ = spec.dir;
+  if (const char* tty = ptsname(master)) s->tty_path_ = tty;
   s->argv_ = spec.argv;
   s->created_ = SystemClock::now();
   s->last_activity_ = SteadyClock::now();

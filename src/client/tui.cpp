@@ -26,6 +26,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
+#include <ftxui/component/loop.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/node.hpp>
@@ -52,6 +53,8 @@ constexpr int kKillTimeoutMs = 10000;
 constexpr auto kPollInterval = std::chrono::milliseconds(500);
 constexpr auto kDoubleClick = std::chrono::milliseconds(400);
 constexpr auto kLongNote = std::chrono::seconds(3);
+constexpr int kMinCols = 40;  // smaller terminals only show "Terminal too small"
+constexpr int kMinRows = 8;
 
 // ---------------------------------------------------------------- theme
 
@@ -121,8 +124,57 @@ bool has_da1_reply(std::string_view buf) {
   return false;
 }
 
+// Turns the bytes read during the startup query into FTXUI events, in order: the terminal's
+// replies (OSC / DCS / APC / PM / SOS strings, DA1 `CSI ? ... c`) are dropped, everything else
+// was typed by the user meanwhile. Sequences are normalized the way FTXUI's own input parser
+// does for the keys the list uses (CR -> Return, BS -> Backspace, SS3 arrows/Home/End -> CSI).
+std::vector<Event> typed_events(std::string_view buf) {
+  auto special = [](std::string seq) {
+    if (seq == "\r") seq = "\n";
+    else if (seq == "\x08") seq = "\x7f";
+    else if (seq.size() == 3 && seq[1] == 'O' && std::strchr("ABCDHF", seq[2])) seq[1] = '[';
+    return Event::Special(std::move(seq));
+  };
+  std::vector<Event> events;
+  std::size_t i = 0;
+  while (i < buf.size()) {
+    const auto u = static_cast<unsigned char>(buf[i]);
+    if (u == 0x1b && i + 1 < buf.size()) {
+      const char kind = buf[i + 1];
+      if (kind == '[') {
+        std::size_t j = i + 2;
+        while (j < buf.size() && buf[j] >= 0x30 && buf[j] <= 0x3F) ++j;
+        while (j < buf.size() && buf[j] >= 0x20 && buf[j] <= 0x2F) ++j;
+        if (j >= buf.size()) break;  // incomplete
+        const bool da1 = i + 2 < j && buf[i + 2] == '?' && buf[j] == 'c';
+        if (!da1) events.push_back(special(std::string(buf.substr(i, j + 1 - i))));
+        i = j + 1;
+      } else if (kind == ']' || kind == 'P' || kind == '_' || kind == '^' || kind == 'X') {
+        std::size_t j = i + 2;
+        while (j < buf.size() && buf[j] != '\a' && !(buf[j] == '\x1b' && j + 1 < buf.size() && buf[j + 1] == '\\')) ++j;
+        i = j >= buf.size() ? j : j + (buf[j] == '\a' ? 1 : 2);
+      } else if (kind == 'O' && i + 2 < buf.size()) {
+        events.push_back(special(std::string(buf.substr(i, 3))));
+        i += 3;
+      } else {
+        events.push_back(special(std::string(buf.substr(i, 2))));  // Alt+key
+        i += 2;
+      }
+    } else if (u < 0x20 || u == 0x7f) {
+      events.push_back(special(std::string(1, buf[i])));
+      ++i;
+    } else {
+      const std::size_t n = u >= 0xF0 ? 4 : u >= 0xE0 ? 3 : u >= 0xC0 ? 2 : 1;
+      events.push_back(Event::Character(std::string(buf.substr(i, n))));
+      i += n;
+    }
+  }
+  return events;
+}
+
 // Asks the terminal for its background color (OSC 11), fenced by DA1; waits up to 200 ms.
-std::optional<Rgb> query_background() {
+// Keys typed meanwhile are appended to `typed`.
+std::optional<Rgb> query_background(std::vector<Event>& typed) {
   termios saved{};
   if (tcgetattr(STDIN_FILENO, &saved) != 0) return std::nullopt;
   termios raw = saved;
@@ -148,10 +200,11 @@ std::optional<Rgb> query_background() {
     }
   }
   tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+  typed = typed_events(buf);
   return parse_osc11(buf);
 }
 
-Theme make_theme(const Config& config) {
+Theme make_theme(const Config& config, std::vector<Event>& typed) {
   Theme t;
   if (config.theme == ThemeMode::Ansi) {
     t.accent = Color::Palette16(5);
@@ -168,7 +221,7 @@ Theme make_theme(const Config& config) {
   std::optional<Rgb> bg;
   bool dark = config.theme != ThemeMode::Light;
   if (config.theme == ThemeMode::Auto) {
-    bg = query_background();
+    bg = query_background(typed);
     dark = !bg || relative_luminance(*bg) < 0.5;
   }
 
@@ -530,8 +583,12 @@ class Tui {
 
   ftxui::Element render();
   bool on_event(const Event& event);
+  // Events to handle before the first one FTXUI delivers (keys typed during startup).
+  void set_pending(std::vector<Event> events) { pending_ = std::move(events); }
 
  private:
+  bool handle_event(const Event& event);
+  static bool too_small(int w, int h) { return w < kMinCols || h < kMinRows; }
   // model
   void rebuild();
   bool matches(const ProcInfo& p) const;
@@ -611,6 +668,8 @@ class Tui {
   // Double-click detection
   std::uint32_t last_click_id_ = 0;
   SteadyClock::time_point last_click_;
+
+  std::vector<Event> pending_;
 };
 
 const ProcInfo* Tui::find(std::uint32_t id) const {
@@ -893,6 +952,12 @@ void Tui::confirm_kill() {
 }
 
 bool Tui::on_event(const Event& event) {
+  if (!pending_.empty())
+    for (const Event& e : std::exchange(pending_, {})) handle_event(e);
+  return handle_event(event);
+}
+
+bool Tui::handle_event(const Event& event) {
   if (event == Event::Custom) {
     std::optional<std::vector<ProcInfo>> list;
     {
@@ -907,6 +972,7 @@ bool Tui::on_event(const Event& event) {
     return true;
   }
   if (event == Event::CtrlZ) return true;  // no job control: the poller must not race a suspend
+  if (const auto size = ftxui::Terminal::Size(); too_small(size.dimx, size.dimy)) return true;
   if (event.is_mouse()) return on_mouse(event);
   switch (mode_) {
     case Mode::List: return on_list_event(event);
@@ -1218,6 +1284,14 @@ ftxui::Element Tui::render() {
   Canvas c(W, H);
   line_ids_.assign(std::size_t(H), 0);
 
+  if (too_small(W, H)) {
+    const std::string msg = "Terminal too small", hint = "^q quit";
+    const int y = std::max(0, (H - 2) / 2);
+    c.put(std::max(0, (W - text_width(msg)) / 2), y, msg, text());
+    c.put(std::max(0, (W - text_width(hint)) / 2), y + 1, hint, secondary());
+    return std::make_shared<CanvasNode>(std::move(c));
+  }
+
   draw_header(c);
   if (procs_.empty()) {
     c.put(3, 3, "No processes yet.", text());
@@ -1306,7 +1380,8 @@ int run_tui(const Config& config, const std::string& launch_dir) {
   const char* colorterm = std::getenv("COLORTERM");
   if (colorterm && (std::strstr(colorterm, "truecolor") || std::strstr(colorterm, "24bit")))
     ftxui::Terminal::SetColorSupport(ftxui::Terminal::Color::TrueColor);
-  const Theme theme = make_theme(config);
+  std::vector<Event> typed;
+  const Theme theme = make_theme(config, typed);
 
   // stdout on a tty is line buffered; emit each frame in one write instead of one per line.
   std::setvbuf(stdout, nullptr, _IOFBF, 1 << 18);
@@ -1319,12 +1394,18 @@ int run_tui(const Config& config, const std::string& launch_dir) {
 
   Tui tui(config, launch_dir, theme, screen, poller, std::move(ctl));
   tui.set_procs(std::move(*initial));
+  tui.set_pending(std::move(typed));
 
   auto component = ftxui::Renderer([&] { return tui.render(); });
   component |= ftxui::CatchEvent([&](Event e) { return tui.on_event(e); });
 
   std::thread worker([poller] { poller->run(); });
-  screen.Loop(component);
+  {
+    ftxui::Loop loop(&screen, component);
+    // Deliver the keys typed during startup now; they precede anything FTXUI reads itself.
+    screen.PostEvent(Event::Custom);
+    loop.Run();
+  }
   {
     std::lock_guard lock(poller->m);
     poller->stop = true;

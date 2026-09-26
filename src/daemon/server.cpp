@@ -271,10 +271,14 @@ void Server::do_attach(Client& c, const Frame& frame) {
   const std::uint32_t id = r.u32();
   const int rows = r.u16();
   const int cols = r.u16();
+  const std::string tty = r.str();
   if (!r.ok()) return send(c, error_frame("malformed request"));
   Proc* p = find_proc(id);
   if (!p) return send(c, error_frame("no such process"));
   if (p->session->exited()) return send(c, error_frame(p->session->name() + " has exited"));
+  // A client running inside the process itself would feed the process its own output.
+  if (!tty.empty() && tty == p->session->tty_path())
+    return send(c, error_frame("cannot attach " + p->session->name() + " to itself"));
 
   if (Proc* old = find_proc(c.attached); old && old != p) {
     old->attached = 0;

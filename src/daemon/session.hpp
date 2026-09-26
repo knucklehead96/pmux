@@ -41,6 +41,8 @@ class Session {
   const std::vector<std::string>& argv() const { return argv_; }
   pid_t pid() const { return pid_; }
   int master_fd() const { return master_.get(); }
+  // Path of the PTY slave (the process's controlling terminal), e.g. /dev/pts/3.
+  const std::string& tty_path() const { return tty_path_; }
   SystemClock::time_point created() const { return created_; }
   SteadyClock::time_point last_activity() const { return last_activity_; }
   std::optional<SystemClock::time_point> last_output() const { return last_output_; }
@@ -80,6 +82,7 @@ class Session {
   pid_t pid_ = -1;
   std::string name_;
   std::string dir_;
+  std::string tty_path_;
   std::vector<std::string> argv_;
   SystemClock::time_point created_;
   SteadyClock::time_point last_activity_;

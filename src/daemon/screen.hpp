@@ -68,6 +68,32 @@ class ModeTracker {
   std::optional<std::string> dyn_colors_[3];  // OSC 10 / 11 / 12
 };
 
+// Rewrites SGR sequences in the stream fed to libvterm (never the bytes sent to a client).
+// libvterm 0.3.3 has no faint attribute, so faint is carried in the alternate font slot:
+// SGR 2 -> 11 (font 1), SGR 22 -> 22;10 (normal intensity also clears faint); resets clear
+// the font already. Also drops underline colors (58, which libvterm misreads as further SGR
+// parameters) and the color-space id of `38:2:<cs>:r:g:b` / `48:...`, and keeps every CSI
+// within libvterm's 16-argument limit (more crash libvterm 0.3.3; long SGRs are split, other
+// sequences truncated). Other bytes pass through unchanged; parser state survives chunk
+// boundaries (a partial CSI is held back).
+class SgrRewriter {
+ public:
+  void feed(const char* data, std::size_t len, std::string& out);
+
+ private:
+  enum class State { Ground, Esc, EscIntermediate, Csi, CsiPass, String, StringEsc };
+  void finish_csi(char final, std::string& out);
+  // Counts argument separators; false for parameter bytes past libvterm's argument limit.
+  bool keep_param_byte(char ch);
+
+  State state_ = State::Ground;
+  std::string raw_;     // the pending CSI, verbatim (from ESC [)
+  std::string params_;  // its parameter bytes
+  std::string c0_;      // C0 controls executed inside it
+  int separators_ = 0;  // ';' and ':' seen in it
+  bool rewritable_ = true;
+};
+
 // Per-session virtual terminal: libvterm screen, scrollback ring, mode tracker.
 class Screen {
  public:
@@ -123,6 +149,8 @@ class Screen {
   std::vector<Line> saved_primary_;  // primary screen rows when the alternate screen was entered
   VTermPos saved_cursor_{};
   ModeTracker modes_;
+  SgrRewriter sgr_;
+  std::string rewritten_;  // scratch for feed()
   std::string replies_;
   bool bell_ = false;
   bool alt_ = false;

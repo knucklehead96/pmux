@@ -17,7 +17,8 @@ namespace pmux {
 //   RENAME      u32 id, str name                   -> OK | ERROR
 //   KILL        u32 id  (exited: removes it)       -> OK once the process has exited | ERROR
 //   REMOVE      u32 id  (exited processes only)    -> OK | ERROR
-//   ATTACH      u32 id, u16 rows, u16 cols         -> OK, SNAPSHOT..., then OUTPUT... | ERROR
+//   ATTACH      u32 id, u16 rows, u16 cols, str client tty path ("" if unknown)
+//                                                  -> OK, SNAPSHOT..., then OUTPUT... | ERROR
 //   VIEW        u32 id  (read-only screen)         -> SNAPSHOT..., then OK(str color resets) | ERROR
 //   RESIZE      u16 rows, u16 cols
 //   INPUT       raw bytes (client -> daemon)

@@ -1,8 +1,8 @@
 # pmux tests
 
 Black-box tests for Milestone 1 (daemon, `-n`/`-l`/`-k`/`-a`, attach
-passthrough), Milestone 2 (list TUI, config file) and Milestone 3 (libvterm
-screen / scrollback / mode restore).
+passthrough), Milestone 2 (list TUI, config file), Milestone 3 (libvterm
+screen / scrollback / mode restore) and Milestone 4 (polish).
 
     tests/run.sh                          # all tests, from anywhere
     tests/run.sh -k Detach                # unittest name filter
@@ -59,6 +59,13 @@ Files:
   pmux.  Raw tests find the end of the snapshot by a DCS marker the probe
   prints on SIGWINCH (pmux signals the app on attach, after the snapshot).
   `RestoreHarnessSelfTest` validates the probe and oracle without pmux.
+
+- `test_polish.py` — M4: faint (SGR 2) restore incl. history and the app's
+  pen, colors whose parameters contain a 2, attached output still
+  byte-exact (plus >16-argument CSIs that crash libvterm 0.3.3), keys typed
+  during the startup theme query, self-attach refusal (CLI, TUI) and nested
+  attach to another process, the too-small terminal screen, and (slow)
+  Release build + install into a temp dir.
 
 Notes: a detached tmux does not answer OSC 11, so pmux uses its assumed
 background (#1E1E1E dark / #FAFAF7 light) and the selection-bar color is

@@ -375,8 +375,7 @@ def expect_exit(child, message, timeout=TIMEOUT):
 
 
 # Input corpus for passthrough tests: every byte except Ctrl+\ (0x1c) plus
-# common key / mouse / paste / focus / kitty sequences.  Same content as
-# test_attach.InputTransparency.
+# common key / mouse / paste / focus / kitty sequences.
 INPUT_SEQS = [
     b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D",
     b"\x1bOA", b"\x1bOB", b"\x1bOC", b"\x1bOD",

@@ -26,6 +26,7 @@ enum PenFlag : std::uint16_t {
   kReverse = 1 << 3,
   kConceal = 1 << 4,
   kStrike = 1 << 5,
+  kFaint = 1 << 6,  // libvterm font 1, see SgrRewriter
 };
 
 void append_int(std::string& out, long v) {
@@ -97,7 +98,8 @@ Screen::Pen pen_of(const VTermScreenCell& cell) {
   Screen::Pen pen;
   const auto& a = cell.attrs;
   pen.flags = std::uint16_t((a.bold ? kBold : 0) | (a.italic ? kItalic : 0) | (a.blink ? kBlink : 0) |
-                            (a.reverse ? kReverse : 0) | (a.conceal ? kConceal : 0) | (a.strike ? kStrike : 0));
+                            (a.reverse ? kReverse : 0) | (a.conceal ? kConceal : 0) | (a.strike ? kStrike : 0) |
+                            (a.font == 1 ? kFaint : 0));
   pen.underline = static_cast<std::uint8_t>(a.underline);
   pen.fg = pack_color(cell.fg);
   pen.bg = pack_color(cell.bg);
@@ -147,6 +149,7 @@ void append_sgr(std::string& out, const Screen::Pen& pen) {
   SgrBuf b;
   b.put("\x1b[0");
   if (pen.flags & kBold) b.put(";1");
+  if (pen.flags & kFaint) b.put(";2");
   if (pen.flags & kItalic) b.put(";3");
   if (pen.underline == 1) {
     b.put(";4");
@@ -612,6 +615,206 @@ std::string ModeTracker::color_resets() const {
 }
 
 // ---------------------------------------------------------------------------
+// SgrRewriter
+
+namespace {
+
+constexpr std::size_t kMaxCsi = 4096;
+// CSI_ARGS_MAX in libvterm: 0.3.3 writes past its argument array (and crashes) on more.
+constexpr int kVtermMaxArgs = 16;
+
+bool c0(unsigned char u) {
+  return u < 0x20;
+}
+
+// Value of an SGR parameter element ("" = 0); -1 if not a plain number.
+long sgr_value(std::string_view s) {
+  long v = 0;
+  for (const char ch : s) {
+    if (ch < '0' || ch > '9') return -1;
+    v = std::min(v * 10 + (ch - '0'), 1000000L);
+  }
+  return v;
+}
+
+std::vector<std::string_view> split(std::string_view s, char sep) {
+  std::vector<std::string_view> out;
+  for (;;) {
+    const std::size_t at = s.find(sep);
+    out.push_back(s.substr(0, at));
+    if (at == std::string_view::npos) return out;
+    s.remove_prefix(at + 1);
+  }
+}
+
+// Rewritten SGR parameters as self-contained items (a color with its arguments is one item);
+// empty if every parameter was dropped.
+std::vector<std::string> rewrite_sgr(std::string_view params) {
+  const auto groups = split(params, ';');
+  std::vector<std::string> out;
+  for (std::size_t i = 0; i < groups.size(); ++i) {
+    const auto elems = split(groups[i], ':');
+    const long v = sgr_value(elems[0]);
+    if (elems.size() > 1) {
+      // Colon form: one self-contained group.
+      if (v == 58) continue;
+      if ((v == 38 || v == 48) && elems.size() == 6 && sgr_value(elems[1]) == 2) {
+        // 38:2:<color space>:r:g:b -> 38:2:r:g:b (libvterm reads the color space as red).
+        out.push_back(std::string(elems[0]) + ":2:" + std::string(elems[3]) + ':' + std::string(elems[4]) +
+                      ':' + std::string(elems[5]));
+        continue;
+      }
+    } else if (v == 38 || v == 48 || v == 58) {
+      // Semicolon form: the following parameters belong to the color (as libvterm counts them).
+      std::size_t n = 0;
+      if (i + 1 < groups.size()) {
+        const long mode = sgr_value(split(groups[i + 1], ':')[0]);
+        n = 1 + (mode == 5 ? 1 : mode == 2 ? 3 : 0);
+      }
+      n = std::min(n, groups.size() - 1 - i);
+      if (v != 58) {
+        std::string item(groups[i]);
+        for (std::size_t k = 1; k <= n; ++k) (item += ';') += groups[i + k];
+        out.push_back(std::move(item));
+      }
+      i += n;
+      continue;
+    }
+    if (v == 2) out.emplace_back("11");
+    else if (v == 22) out.emplace_back("22;10");
+    else out.emplace_back(groups[i]);
+  }
+  return out;
+}
+
+}  // namespace
+
+bool SgrRewriter::keep_param_byte(char ch) {
+  if (ch == ';' || ch == ':') ++separators_;
+  return separators_ < kVtermMaxArgs;
+}
+
+void SgrRewriter::finish_csi(char final, std::string& out) {
+  if (final != 'm' || !rewritable_) {
+    out += raw_;  // at most kVtermMaxArgs arguments
+    return;
+  }
+  out += c0_;
+  // SGRs longer than libvterm's argument limit are split into several at item boundaries.
+  int args = 0;
+  for (const std::string& item : rewrite_sgr(params_)) {
+    const int n = 1 + int(std::count_if(item.begin(), item.end(), [](char c) { return c == ';' || c == ':'; }));
+    if (n > kVtermMaxArgs) continue;
+    if (args > 0 && args + n > kVtermMaxArgs) {
+      out += 'm';
+      args = 0;
+    }
+    out += args == 0 ? "\x1b[" : ";";
+    out += item;
+    args += n;
+  }
+  if (args > 0) out += 'm';
+}
+
+void SgrRewriter::feed(const char* data, std::size_t len, std::string& out) {
+  out.reserve(out.size() + len + 16);
+  for (std::size_t i = 0; i < len; ++i) {
+    const char ch = data[i];
+    const auto u = static_cast<unsigned char>(ch);
+    switch (state_) {
+      case State::Ground:
+        if (ch == '\x1b') state_ = State::Esc;  // held until the next byte
+        else out += ch;
+        break;
+      case State::Esc:
+        if (ch == '[') {
+          state_ = State::Csi;
+          raw_.assign("\x1b[");
+          params_.clear();
+          separators_ = 0;
+          c0_.clear();
+          rewritable_ = true;
+        } else if ((c0(u) && ch != '\x1b' && ch != '\x18' && ch != '\x1a') || u == 0x7F) {
+          out += ch;  // C0 executes (DEL is ignored) without leaving the escape sequence
+        } else {
+          out += '\x1b';
+          if (ch == '\x1b') break;  // restarts; the new ESC is held
+          out += ch;
+          if (ch == ']' || ch == 'P' || ch == 'X' || ch == '^' || ch == '_') state_ = State::String;
+          else if (u >= 0x20 && u <= 0x2F) state_ = State::EscIntermediate;
+          else state_ = State::Ground;
+        }
+        break;
+      case State::EscIntermediate:
+        if (ch == '\x1b') {
+          state_ = State::Esc;
+        } else {
+          out += ch;
+          if ((u >= 0x30 && u <= 0x7E) || ch == '\x18' || ch == '\x1a') state_ = State::Ground;
+        }
+        break;
+      case State::Csi:
+        if (ch == '\x1b') {
+          out += raw_;
+          state_ = State::Esc;
+          break;
+        }
+        if (u >= 0x30 && u <= 0x3F) {
+          params_ += ch;
+          if (!(ch >= '0' && ch <= '9') && ch != ';' && ch != ':') rewritable_ = false;
+          if (keep_param_byte(ch)) raw_ += ch;
+        } else if (ch == '\x18' || ch == '\x1a') {
+          out += raw_;
+          out += ch;
+          state_ = State::Ground;
+        } else if (c0(u)) {
+          raw_ += ch;
+          c0_ += ch;
+        } else if (u >= 0x40 && u <= 0x7E) {
+          raw_ += ch;
+          state_ = State::Ground;
+          finish_csi(ch, out);
+        } else {
+          raw_ += ch;
+          rewritable_ = false;  // intermediates, DEL, non-ASCII
+        }
+        if (state_ == State::Csi && params_.size() + c0_.size() > kMaxCsi) {
+          out += raw_;
+          state_ = State::CsiPass;
+        }
+        break;
+      case State::CsiPass:
+        if (ch == '\x1b') {
+          state_ = State::Esc;
+        } else if (u >= 0x30 && u <= 0x3F && !keep_param_byte(ch)) {
+          // dropped: beyond libvterm's argument limit
+        } else {
+          out += ch;
+          if ((u >= 0x40 && u <= 0x7E) || ch == '\x18' || ch == '\x1a') state_ = State::Ground;
+        }
+        break;
+      case State::String:
+        if (ch == '\x1b') {
+          state_ = State::StringEsc;
+        } else {
+          out += ch;
+          if (ch == '\a' || ch == '\x18' || ch == '\x1a') state_ = State::Ground;
+        }
+        break;
+      case State::StringEsc:
+        if (ch == '\\') {
+          out += "\x1b\\";
+          state_ = State::Ground;
+        } else {
+          state_ = State::Esc;  // the ESC is still held
+          --i;
+        }
+        break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Screen
 
 static int cb_sb_popline(int cols, VTermScreenCell* cells, void* user) {
@@ -645,6 +848,7 @@ static int cb_sb_popline(int cols, VTermScreenCell* cells, void* user) {
       cell.attrs.reverse = (pen.flags & kReverse) != 0;
       cell.attrs.conceal = (pen.flags & kConceal) != 0;
       cell.attrs.strike = (pen.flags & kStrike) != 0;
+      cell.attrs.font = (pen.flags & kFaint) ? 1 : 0;
       cell.attrs.underline = pen.underline & 3u;
       cell.fg = unpack_color(pen.fg);
       cell.bg = unpack_color(pen.bg);
@@ -686,7 +890,11 @@ std::uint32_t Screen::default_bg() const {
   return pack_color(bg);
 }
 
-void Screen::feed(const char* data, std::size_t len) {
+void Screen::feed(const char* raw, std::size_t raw_len) {
+  rewritten_.clear();
+  sgr_.feed(raw, raw_len, rewritten_);
+  const char* data = rewritten_.data();
+  std::size_t len = rewritten_.size();
   while (len > 0) {
     const std::size_t n = modes_.feed(data, len);
     if (modes_.take_alt_request()) {
@@ -800,6 +1008,8 @@ std::string Screen::snapshot(bool interactive) {
   pen_cell.attrs.conceal = v.boolean;
   vterm_state_get_penattr(state_, VTERM_ATTR_STRIKE, &v);
   pen_cell.attrs.strike = v.boolean;
+  vterm_state_get_penattr(state_, VTERM_ATTR_FONT, &v);
+  pen_cell.attrs.font = unsigned(v.number) & 15u;
   vterm_state_get_penattr(state_, VTERM_ATTR_UNDERLINE, &v);
   pen_cell.attrs.underline = unsigned(v.number) & 3u;
   vterm_state_get_penattr(state_, VTERM_ATTR_FOREGROUND, &v);

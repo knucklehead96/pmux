@@ -4,8 +4,8 @@ import random
 import time
 import unittest
 
-from helpers import (DETACH, PmuxTestCase, expect_exit, load_json, probe, read_file,
-                     read_until, wait_until)
+from helpers import (DETACH, PmuxTestCase, expect_exit, input_corpus_chunks, load_json, probe,
+                     read_file, read_until, wait_until)
 
 KITTY_DETACH = b"\x1b[92;5u"
 KITTY_DETACH_PRESS = b"\x1b[92;5:1u"
@@ -38,25 +38,8 @@ class InputTransparency(AttachCase):
     def test_all_bytes_and_escape_sequences(self):
         log = self.inlog()
         c = self.px.attach("app")
-        all_bytes = bytes(b for b in range(256) if b != 0x1C)
-        chunks = [all_bytes[i:i + 37] for i in range(0, len(all_bytes), 37)]
-        seqs = [
-            b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D",          # arrows
-            b"\x1bOA", b"\x1bOB", b"\x1bOC", b"\x1bOD",          # app-mode arrows
-            b"\x1b[1;5C", b"\x1b[H", b"\x1b[F", b"\x1b[3~",      # ctrl-right, home, end, del
-            b"\x1bOP", b"\x1bOQ", b"\x1bOR", b"\x1bOS",          # F1-F4
-            b"\x1b[15~", b"\x1b[17~", b"\x1b[18~", b"\x1b[19~",  # F5-F8
-            b"\x1b[20~", b"\x1b[21~", b"\x1b[23~", b"\x1b[24~",  # F9-F12
-            b"\x1bx", b"\x1bX", b"\x1b\x1b",                      # Alt+x, Alt+X, Alt+Esc
-            b"\x1b[200~pasted\r\ntext \x03\x1b[A \xc3\xa9\x1b[201~",  # bracketed paste
-            b"\x1b[<0;10;5M", b"\x1b[<0;10;5m", b"\x1b[<64;3;4M",  # SGR mouse press/rel/wheel
-            b"\x1b[I", b"\x1b[O",                                 # focus in/out
-            b"\x1b[97;5u", b"\x1b[97;5:1u", b"\x1b[97;5:3u",      # kitty ctrl+a
-            b"\x1b[92u", b"\x1b[92;1u",                           # kitty plain backslash
-            "héllo €😀".encode(),
-        ]
         expected = b""
-        for part in chunks + seqs:
+        for part in input_corpus_chunks():
             c.send(part)
             expected += part
         self.wait_log(log, expected)

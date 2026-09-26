@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(pmux CXX)
 
+# Single-config generators: default to an optimized (Release) build.
+get_property(PMUX_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT PMUX_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -11,6 +17,7 @@ FetchContent_Declare(ftxui
   GIT_TAG v6.1.9
   GIT_SHALLOW TRUE
 )
+set(FTXUI_ENABLE_INSTALL OFF CACHE BOOL "pmux installs only its binary" FORCE)
 FetchContent_MakeAvailable(ftxui)
 
 find_package(PkgConfig REQUIRED)
@@ -35,3 +42,5 @@ target_link_libraries(pmux PRIVATE
   PkgConfig::VTERM
   util
 )
+
+install(TARGETS pmux RUNTIME DESTINATION bin)
