@@ -54,6 +54,7 @@ class Server {
   void handle_frame(Client& c, const Frame& frame);
   void do_list(Client& c);
   void do_new(Client& c, const Frame& frame);
+  void do_rename(Client& c, const Frame& frame);
   void do_attach(Client& c, const Frame& frame);
   void do_resize(Client& c, const Frame& frame);
   void do_input(Client& c, const Frame& frame);

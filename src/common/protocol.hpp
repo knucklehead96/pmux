@@ -14,6 +14,7 @@ namespace pmux {
 //   LIST        -                                  -> LIST_REPLY
 //   LIST_REPLY  u32 count, ProcInfo...
 //   NEW         str name, str dir, strs argv, strs env, u16 rows, u16 cols   -> OK(u32 id, str name) | ERROR
+//   RENAME      u32 id, str name                   -> OK | ERROR
 //   KILL        u32 id  (exited: removes it)       -> OK once the process has exited | ERROR
 //   REMOVE      u32 id  (exited processes only)    -> OK | ERROR
 //   ATTACH      u32 id, u16 rows, u16 cols         -> OK, then OUTPUT... | ERROR
@@ -125,6 +126,10 @@ struct ProcInfo {
   std::uint64_t idle_ms = 0;     // since last output, or since start if none
   bool exited = false;
   std::int32_t wait_status = 0;
+  std::uint64_t created = 0;      // unix seconds
+  std::uint64_t last_output = 0;  // unix seconds, 0 if none
+  bool bell = false;              // BEL seen since the last attach
+  std::string fg_command;         // foreground process group's argv, joined; empty if unknown
 };
 
 std::vector<std::uint8_t> encode_proc_list(const std::vector<ProcInfo>& procs);

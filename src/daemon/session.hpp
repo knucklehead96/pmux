@@ -8,9 +8,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "common/fd.hpp"
+#include "daemon/bell.hpp"
 
 namespace pmux {
 
@@ -40,6 +42,12 @@ class Session {
   int master_fd() const { return master_.get(); }
   SystemClock::time_point created() const { return created_; }
   SteadyClock::time_point last_activity() const { return last_activity_; }
+  std::optional<SystemClock::time_point> last_output() const { return last_output_; }
+  bool bell() const { return bell_; }
+  void clear_bell() { bell_ = false; }
+  void set_name(std::string name) { name_ = std::move(name); }
+  // argv of the PTY's foreground process group leader, joined by spaces; empty if unknown.
+  std::string fg_command() const;
 
   // Reads one chunk of PTY output into `out`.
   ReadStatus read_output(std::string& out);
@@ -72,6 +80,9 @@ class Session {
   std::vector<std::string> argv_;
   SystemClock::time_point created_;
   SteadyClock::time_point last_activity_;
+  std::optional<SystemClock::time_point> last_output_;
+  BellScanner bell_scanner_;
+  bool bell_ = false;
   std::string input_;
   std::optional<int> reaped_;
   std::optional<int> exit_status_;

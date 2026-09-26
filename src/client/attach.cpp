@@ -215,17 +215,22 @@ bool find_detach_key(const char* buf, std::size_t len, std::size_t& pos) {
   return false;
 }
 
-int attach(int daemon_fd, std::uint32_t session_id, const std::string& name) {
+AttachResult attach_session(int daemon_fd, std::uint32_t session_id, std::string_view prelude) {
+  AttachResult result;
   if (!isatty(STDIN_FILENO)) {
-    std::fprintf(stderr, "pmux: stdin is not a terminal\n");
-    return 1;
+    result.error = "stdin is not a terminal";
+    return result;
   }
 
-  sigset_t mask;
+  sigset_t mask, saved_mask;
   sigemptyset(&mask);
   sigaddset(&mask, SIGWINCH);
-  sigprocmask(SIG_BLOCK, &mask, nullptr);
+  sigprocmask(SIG_BLOCK, &mask, &saved_mask);
   UniqueFd winch_fd(signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC));
+  auto restore_mask = [&] {
+    winch_fd.reset();
+    sigprocmask(SIG_SETMASK, &saved_mask, nullptr);
+  };
 
   Winsize ws = terminal_size(STDIN_FILENO);
   if (ws.rows == 0 || ws.cols == 0) ws = {24, 80};
@@ -234,14 +239,12 @@ int attach(int daemon_fd, std::uint32_t session_id, const std::string& name) {
   std::optional<Frame> reply;
   if (send_frame(daemon_fd, make_frame(MsgType::Attach, request)))
     reply = recv_frame(daemon_fd, decoder, 5000);
-  if (!reply) {
-    std::fprintf(stderr, "pmux: no reply from daemon\n");
-    return 1;
-  }
-  if (reply->type != MsgType::Ok) {
-    std::string message = PayloadReader(reply->payload).str();
-    std::fprintf(stderr, "pmux: %s\n", message.empty() ? "attach failed" : message.c_str());
-    return 1;
+  if (!reply || reply->type != MsgType::Ok) {
+    restore_mask();
+    if (!reply) result.error = "no reply from daemon";
+    else result.error = PayloadReader(reply->payload).str();
+    if (result.error.empty()) result.error = "attach failed";
+    return result;
   }
 
   termios saved{};
@@ -249,28 +252,45 @@ int attach(int daemon_fd, std::uint32_t session_id, const std::string& name) {
   termios raw = saved;
   cfmakeraw(&raw);
   tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+  if (!prelude.empty()) write_all(STDOUT_FILENO, prelude.data(), prelude.size());
 
   Passthrough passthrough(daemon_fd, decoder, winch_fd.get());
   const Outcome outcome = passthrough.run();
 
   tcsetattr(STDIN_FILENO, TCSADRAIN, &saved);
   write_all(STDOUT_FILENO, kModeResets.data(), kModeResets.size());
+  restore_mask();
 
-  const int status = passthrough.exit_status();
+  result.wait_status = passthrough.exit_status();
   switch (outcome) {
-    case Outcome::Detached:
+    case Outcome::Detached: result.outcome = AttachOutcome::Detached; break;
+    case Outcome::AttachedElsewhere: result.outcome = AttachOutcome::AttachedElsewhere; break;
+    case Outcome::Exited: result.outcome = AttachOutcome::Exited; break;
+    case Outcome::Lost: result.outcome = AttachOutcome::Lost; break;
+  }
+  return result;
+}
+
+int attach(int daemon_fd, std::uint32_t session_id, const std::string& name) {
+  const AttachResult r = attach_session(daemon_fd, session_id);
+  const int status = r.wait_status;
+  switch (r.outcome) {
+    case AttachOutcome::Detached:
       std::fprintf(stderr, "[detached from %s]\n", name.c_str());
       return 0;
-    case Outcome::AttachedElsewhere:
+    case AttachOutcome::AttachedElsewhere:
       std::fprintf(stderr, "[detached from %s: attached elsewhere]\n", name.c_str());
       return 0;
-    case Outcome::Exited:
+    case AttachOutcome::Exited:
       if (WIFSIGNALED(status))
         std::fprintf(stderr, "[%s killed by signal %d]\n", name.c_str(), WTERMSIG(status));
       else
         std::fprintf(stderr, "[%s exited: %d]\n", name.c_str(), WEXITSTATUS(status));
       return 0;
-    case Outcome::Lost:
+    case AttachOutcome::Failed:
+      std::fprintf(stderr, "pmux: %s\n", r.error.c_str());
+      return 1;
+    case AttachOutcome::Lost:
       break;
   }
   std::fprintf(stderr, "pmux: lost connection to daemon\n");

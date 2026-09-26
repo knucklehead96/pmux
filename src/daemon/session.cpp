@@ -10,6 +10,8 @@
 
 #include <cerrno>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 
 namespace pmux {
 
@@ -101,10 +103,24 @@ Session::ReadStatus Session::read_output(std::string& out) {
   if (n > 0) {
     out.assign(buf, std::size_t(n));
     last_activity_ = SteadyClock::now();
+    last_output_ = SystemClock::now();
+    if (bell_scanner_.feed(buf, std::size_t(n))) bell_ = true;
     return ReadStatus::Data;
   }
   if (n < 0 && (errno == EAGAIN || errno == EINTR)) return ReadStatus::Again;
   return ReadStatus::Eof;
+}
+
+std::string Session::fg_command() const {
+  if (!master_ || exited()) return {};
+  const pid_t pgrp = tcgetpgrp(master_.get());
+  if (pgrp <= 0) return {};
+  std::ifstream in("/proc/" + std::to_string(pgrp) + "/cmdline", std::ios::binary);
+  std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  while (!raw.empty() && raw.back() == '\0') raw.pop_back();
+  for (char& ch : raw)
+    if (ch == '\0') ch = ' ';
+  return raw;
 }
 
 void Session::queue_input(std::string_view data) {

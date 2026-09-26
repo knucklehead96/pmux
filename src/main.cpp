@@ -14,6 +14,7 @@
 #include "client/attach.hpp"
 #include "client/connect.hpp"
 #include "client/tui.hpp"
+#include "common/config.hpp"
 #include "common/protocol.hpp"
 #include "daemon/server.hpp"
 
@@ -160,12 +161,13 @@ std::optional<ProcInfo> lookup(int fd, const std::string& name) {
   return std::nullopt;
 }
 
-int cmd_new(const Options& o) {
+int cmd_new(const Options& o, const Config& config) {
   if (!o.detached && !isatty(STDIN_FILENO)) {
     std::fprintf(stderr, "pmux: stdin is not a terminal (use -d to create detached)\n");
     return 1;
   }
   std::vector<std::string> argv = o.cmd;
+  if (argv.empty()) argv = split_command(config.default_cmd);
   if (argv.empty()) {
     const char* shell = std::getenv("SHELL");
     argv.emplace_back(shell && *shell ? shell : "/bin/sh");
@@ -230,9 +232,11 @@ int main(int argc, char** argv) {
     std::fputs(kUsage, stderr);
     return 2;
   }
+  Config config;
+  if (options->mode != Mode::Daemon && options->mode != Mode::Help) config = load_config();
   switch (options->mode) {
-    case Mode::Tui: return run_tui(-1);
-    case Mode::New: return cmd_new(*options);
+    case Mode::Tui: return run_tui(config, current_dir());
+    case Mode::New: return cmd_new(*options, config);
     case Mode::List: return cmd_list();
     case Mode::Attach: return cmd_attach(*options);
     case Mode::Kill: return cmd_kill(*options);

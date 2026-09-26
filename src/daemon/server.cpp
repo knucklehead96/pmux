@@ -171,6 +171,7 @@ void Server::handle_frame(Client& c, const Frame& frame) {
   switch (frame.type) {
     case MsgType::List: do_list(c); break;
     case MsgType::New: do_new(c, frame); break;
+    case MsgType::Rename: do_rename(c, frame); break;
     case MsgType::Attach: do_attach(c, frame); break;
     case MsgType::Resize: do_resize(c, frame); break;
     case MsgType::Input: do_input(c, frame); break;
@@ -197,6 +198,13 @@ void Server::do_list(Client& c) {
         std::chrono::duration_cast<std::chrono::milliseconds>(now - s.last_activity()).count());
     info.exited = s.exited();
     info.wait_status = s.exit_status();
+    info.created = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(s.created().time_since_epoch()).count());
+    if (const auto out = s.last_output())
+      info.last_output = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::seconds>(out->time_since_epoch()).count());
+    info.bell = s.bell();
+    info.fg_command = s.fg_command();
     list.push_back(std::move(info));
   }
   send(c, make_frame(MsgType::ListReply, encode_proc_list(list)));
@@ -239,6 +247,20 @@ void Server::do_new(Client& c, const Frame& frame) {
   send(c, ok_frame(PayloadWriter().u32(id).str(spec.name).take()));
 }
 
+void Server::do_rename(Client& c, const Frame& frame) {
+  PayloadReader r(frame.payload);
+  const std::uint32_t id = r.u32();
+  std::string name = r.str();
+  if (!r.ok()) return send(c, error_frame("malformed request"));
+  Proc* p = find_proc(id);
+  if (!p) return send(c, error_frame("no such process"));
+  if (name == p->session->name()) return send(c, ok_frame());
+  if (!valid_name(name)) return send(c, error_frame("invalid name: " + name));
+  if (name_taken(name)) return send(c, error_frame("name already in use: " + name));
+  p->session->set_name(std::move(name));
+  send(c, ok_frame());
+}
+
 void Server::do_attach(Client& c, const Frame& frame) {
   PayloadReader r(frame.payload);
   const std::uint32_t id = r.u32();
@@ -259,6 +281,7 @@ void Server::do_attach(Client& c, const Frame& frame) {
   }
   p->attached = c.id;
   c.attached = id;
+  p->session->clear_bell();
   send(c, ok_frame());
   p->session->resize(rows, cols);
   p->session->notify_winch();

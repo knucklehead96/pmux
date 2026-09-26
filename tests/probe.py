@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """In-pmux probe application used by the test suite.
 
-Usage: probe.py [--ready PATH] MODE ARGS...
+Usage: probe.py [--ready PATH] [--winch-mark TEXT] MODE ARGS...
 
 The probe puts its controlling tty (fd 0) into raw mode, installs whatever
 signal handlers the mode needs, and only then creates the --ready file (its
 content is the probe's pid).  Tests wait for that file before sending any
 input so that no byte can be mangled by the pty line discipline.
+
+--winch-mark TEXT makes every SIGWINCH clear the screen and print
+"[winch:TEXT]" (the brackets keep the marker from matching the probe's own
+command line, e.g. in the pmux list).  Not combinable with "emit ... winch"
+or "winsize"/"signals", which install their own SIGWINCH handler.
 
 Modes:
   inlog <path>          Append every input byte to <path> (unbuffered, one
@@ -92,10 +97,19 @@ def idle_forever():
             signal.pause()
 
 
+def winch_marker(text):
+    return b"\x1b[H\x1b[2J[winch:" + text.encode() + b"]\r\n"
+
+
 def main(argv):
     ready = None
-    if argv[:1] == ["--ready"]:
-        ready, argv = argv[1], argv[2:]
+    winch_mark = None
+    while argv[:1] in (["--ready"], ["--winch-mark"]) and len(argv) >= 2:
+        if argv[0] == "--ready":
+            ready = argv[1]
+        else:
+            winch_mark = argv[1]
+        argv = argv[2:]
     if not argv:
         sys.stderr.write(__doc__)
         return 2
@@ -103,6 +117,10 @@ def main(argv):
 
     if os.isatty(0):
         tty.setraw(0)
+
+    if winch_mark is not None:
+        marker = winch_marker(winch_mark)
+        signal.signal(signal.SIGWINCH, lambda *_: write_all(1, marker))
 
     wakeup_r = None
     if mode == "inlog":

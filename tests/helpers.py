@@ -233,16 +233,21 @@ class PmuxEnv:
     def path(self, name):
         return os.path.join(self.files, name)
 
-    def probe_cmd(self, mode, *args, ready=None):
+    def probe_cmd(self, mode, *args, ready=None, winch_mark=None):
         cmd = [PYTHON, PROBE]
         if ready:
             cmd += ["--ready", ready]
+        if winch_mark is not None:
+            cmd += ["--winch-mark", winch_mark]
         return cmd + [mode, *args]
 
-    def create_probe(self, name, mode, *args, env=None):
-        """pmux -n NAME -d -- probe MODE ARGS; wait for the probe's ready file."""
+    def create_probe(self, name, mode, *args, env=None, cwd=None, winch_mark=None):
+        """pmux -n NAME -d -- probe MODE ARGS (started in cwd, default
+        self.work); wait for the probe's ready file."""
         ready = self.path(name + ".ready")
-        p = self.run("-n", name, "-d", "--", *self.probe_cmd(mode, *args, ready=ready), env=env)
+        p = self.run("-n", name, "-d", "--",
+                     *self.probe_cmd(mode, *args, ready=ready, winch_mark=winch_mark),
+                     env=env, cwd=cwd)
         if p.returncode != 0:
             raise AssertionError("pmux -n %s -d failed rc=%d stderr=%r"
                                  % (name, p.returncode, p.stderr))
@@ -253,6 +258,13 @@ class PmuxEnv:
         wait_until(lambda: os.path.exists(ready), msg=lambda: "%s never became ready; -l=%r"
                    % (name, self.run("-l").stdout))
         return int(read_file(ready))
+
+    def write_config(self, text):
+        """Write ~/.pmux/config (HOME is this env's private home)."""
+        d = os.path.join(self.home, ".pmux")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config"), "w") as f:
+            f.write(text)
 
     # -- teardown ----------------------------------------------------------
 
@@ -360,6 +372,32 @@ def expect_exit(child, message, timeout=TIMEOUT):
     if message is not None and message not in out:
         raise AssertionError("expected %r in client output, got %r" % (message, out))
     return child.exitstatus, child.signalstatus, out
+
+
+# Input corpus for passthrough tests: every byte except Ctrl+\ (0x1c) plus
+# common key / mouse / paste / focus / kitty sequences.  Same content as
+# test_attach.InputTransparency.
+INPUT_SEQS = [
+    b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D",
+    b"\x1bOA", b"\x1bOB", b"\x1bOC", b"\x1bOD",
+    b"\x1b[1;5C", b"\x1b[H", b"\x1b[F", b"\x1b[3~",
+    b"\x1bOP", b"\x1bOQ", b"\x1bOR", b"\x1bOS",
+    b"\x1b[15~", b"\x1b[17~", b"\x1b[18~", b"\x1b[19~",
+    b"\x1b[20~", b"\x1b[21~", b"\x1b[23~", b"\x1b[24~",
+    b"\x1bx", b"\x1bX", b"\x1b\x1b",
+    b"\x1b[200~pasted\r\ntext \x03\x1b[A \xc3\xa9\x1b[201~",
+    b"\x1b[<0;10;5M", b"\x1b[<0;10;5m", b"\x1b[<64;3;4M",
+    b"\x1b[I", b"\x1b[O",
+    b"\x1b[97;5u", b"\x1b[97;5:1u", b"\x1b[97;5:3u",
+    b"\x1b[92u", b"\x1b[92;1u",
+    "h\u00e9llo \u20ac\U0001F600".encode(),
+]
+
+
+def input_corpus_chunks():
+    """Chunks to send one by one; their concatenation is the expected log."""
+    all_bytes = bytes(b for b in range(256) if b != 0x1C)
+    return [all_bytes[i:i + 37] for i in range(0, len(all_bytes), 37)] + list(INPUT_SEQS)
 
 
 class PmuxTestCase(unittest.TestCase):
