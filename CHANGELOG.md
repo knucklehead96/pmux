@@ -23,8 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Attach and the exited-process view use the terminal's alternate screen, like
   tmux: after detaching or quitting, the shell's screen and native scrollback
-  are exactly as before (they used to be replaced by the process's output). The
+  are as before (they used to be replaced by the process's output). The
   process's history is no longer copied into the native scrollback.
+- An app's full reset (RIS) is replaced by a soft reset of the modes and colors
+  it changed, and its erase-scrollback (`CSI 3 J`, e.g. from `clear`) clears only
+  pmux's history of the process: neither reaches the terminal, where they would
+  leave the alternate screen or erase the shell's scrollback.
 - The app's own alternate screen switches are emulated: quitting `less` or `vim`
   inside pmux repaints the app's normal screen instead of leaving pmux's.
 - `[detached from NAME]` and the exit messages of `pmux -n` / `pmux -a` are
@@ -32,8 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The view of an exited process is sized to the terminal: a terminal taller than
-  the process's screen no longer shows lines twice.
+- The view of an exited process is painted at the terminal's size without
+  resizing the process's stored screen: a terminal taller than that screen no
+  longer shows lines twice.
 
 ## [0.1.0] - 2026-09-26
 

@@ -13,7 +13,7 @@ A terminal process multiplexer. It keeps long-running processes alive in the bac
 - **One list, grouped by directory.** A Claude Code-style list shows every process under the directory where it was started, along with its current foreground command and its age.
 - **Status at a glance.** `●` means running, `!` means it rang the bell while you were away, and `○` means it exited (with the exit code or signal).
 - **Byte-exact attach.** When you attach, the process gets the whole terminal: no status bar and no border. Every byte you type goes straight to it, except for one detach key (`Ctrl+←` by default).
-- **Your shell stays clean.** Like tmux, pmux shows the process on the terminal's alternate screen. After you detach or quit, your shell's screen and scrollback are exactly as you left them.
+- **Your shell stays clean.** Like tmux, pmux shows the process on the terminal's alternate screen. After you detach or quit, your shell's screen and scrollback are as you left them: an app can't clear your terminal's scrollback or reset it through pmux.
 - **Screen and scrollback restore.** The daemon keeps a libvterm screen and history for every process. On reattach, pmux restores the screen, the cursor and the terminal modes, and the mouse wheel scrolls back through the history. This works for full-screen apps on the alternate screen too.
 - **Processes outlive the UI.** Processes keep running after you quit the list or close the terminal.
 - **Automatic dark/light theme.** pmux reads the terminal's background color and picks a matching palette. There are four accent colors and a 16-color `ansi` theme.
@@ -155,7 +155,7 @@ All of a process's output goes into its own libvterm screen with a scrollback ri
 
 The attached app behaves as if it were running directly in your terminal:
 
-- **Output is byte-for-byte.** Between the restore on attach and the detach, pmux writes nothing of its own, apart from the alternate screen repaints, its mouse modes and scroll mode. It never sends a full reset (RIS).
+- **Output is byte-for-byte.** Between the restore on attach and the detach, pmux writes nothing of its own, apart from the alternate screen repaints, its mouse modes and scroll mode. It removes only what would reach past its alternate screen: the app's alternate screen switches, erase-scrollback (`CSI 3 J`) and full reset (RIS, replaced by a soft reset and a repaint). pmux itself never sends RIS.
 - **Input is byte-for-byte.** Everything except the detach key (and the mouse, while the app doesn't track it) reaches the app, and the app gets the full terminal size.
 - **Your real terminal answers queries.** The app's queries (DA, DSR, OSC 11, kitty keyboard, XTVERSION) are answered by your terminal. While the process is detached or you are in scroll mode, libvterm answers the basic ones so apps don't hang.
 - **Detaching is invisible to the app.** The PTY stays open and the app gets no `SIGHUP`. pmux adds no environment variables or wrapper processes, and the app keeps your real `TERM` and `COLORTERM`. On detach, pmux undoes the app's modes and color changes, so the list always comes back clean.

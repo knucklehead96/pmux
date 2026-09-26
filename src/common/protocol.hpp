@@ -27,10 +27,11 @@ namespace pmux {
 //               The client shows the session on its terminal's alternate screen. The app's own
 //               alternate screen switches (DEC private modes 47 / 1047 / 1049) are removed from
 //               OUTPUT and followed by a repaint of the screen the app switched to; RIS is
-//               followed by CSI ? 1049 h and a repaint. Everything else in OUTPUT is the app's
-//               output, byte-exact.
-//   VIEW        u32 id [, u16 rows, u16 cols]  (read-only screen; an exited process's screen is
-//               resized to rows x cols first)  -> SNAPSHOT..., then OK(str color resets) | ERROR
+//               replaced by a soft reset (DECSTR, mode and color resets, kitty flags popped) and
+//               a repaint; CSI 3 J is removed. Everything else in OUTPUT is the app's output,
+//               byte-exact; after a SNAPSHOT it resumes outside any escape sequence.
+//   VIEW        u32 id [, u16 rows, u16 cols]  (read-only screen, painted at rows x cols; the
+//               stored screen is not resized)  -> SNAPSHOT..., then OK(str color resets) | ERROR
 //   RESIZE      u16 rows, u16 cols
 //   INPUT       raw bytes (client -> daemon); ends scroll mode first
 //   OUTPUT      raw bytes (daemon -> client)
@@ -43,7 +44,9 @@ namespace pmux {
 //   SCROLL      client -> daemon: u8 ScrollOp, u16 lines (Up / Down)
 //               Scroll mode (per client, attached or viewing): the daemon paints the view with
 //               SNAPSHOT and sends STATE with Scrolled set; reaching the bottom (or Exit) paints
-//               the live screen (a snapshot; no SIGWINCH) and resumes OUTPUT.
+//               the live screen (a snapshot that first turns off the modes it may set and resets
+//               the colors changed at scroll entry; no SIGWINCH) and resumes OUTPUT. A client
+//               that leaves while scrolled also gets those color resets with DETACH / EXITED.
 //   DETACH      client -> daemon: -  (detach request; answered with DETACH)
 //               daemon -> client: str color resets  (reply, or attached elsewhere)
 //   EXITED      i32 wait status, str color resets

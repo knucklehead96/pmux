@@ -115,7 +115,7 @@ Session::ReadStatus Session::read_output(std::vector<Screen::OutputPiece>& out, 
   const ssize_t n = read(master_.get(), buf, sizeof buf);
   if (n > 0) {
     screen_->feed(buf, std::size_t(n), out);
-    if (screen_->take_bell() && !attached) bell_ = true;
+    if (screen_->take_bell() && (!attached || scrolled)) bell_ = true;
     const std::string replies = screen_->take_replies();
     if ((!attached || scrolled) && !replies.empty()) queue_input(replies);
     return ReadStatus::Data;

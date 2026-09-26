@@ -823,9 +823,14 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id, const Config& c
   termios raw = saved;
   cfmakeraw(&raw);
   tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-  std::string prologue(kEnterAltScreen);
-  prologue += kPmuxMouse;  // for the wheel
-  write_all(STDOUT_FILENO, prologue.data(), prologue.size());
+  write_all(STDOUT_FILENO, kEnterAltScreen.data(), kEnterAltScreen.size());
+  // A snapshot's DECSTR turns the mouse modes off on some terminals (VTE): pmux's mouse (for
+  // the wheel) is turned on after each.
+  auto write_snapshot = [](const Frame& frame) {
+    std::string bytes(frame.payload.begin(), frame.payload.end());
+    bytes += kPmuxMouse;
+    write_all(STDOUT_FILENO, bytes.data(), bytes.size());
+  };
 
   Winsize ws = terminal_size(STDIN_FILENO);
   if (ws.rows == 0 || ws.cols == 0) ws = {24, 80};
@@ -836,7 +841,7 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id, const Config& c
   if (send_frame(daemon_fd, make_frame(MsgType::View, request))) {
     while (auto frame = recv_frame(daemon_fd, decoder, 5000)) {
       if (frame->type == MsgType::Snapshot) {
-        write_all(STDOUT_FILENO, frame->payload.data(), frame->payload.size());
+        write_snapshot(*frame);
         continue;
       }
       if (frame->type == MsgType::Ok) {
@@ -866,7 +871,7 @@ ViewResult view_session(int daemon_fd, std::uint32_t session_id, const Config& c
         if (got > 0) decoder.feed(buf, std::size_t(got));
         while (auto frame = decoder.next()) {
           if (frame->type == MsgType::Snapshot) {
-            write_all(STDOUT_FILENO, frame->payload.data(), frame->payload.size());
+            write_snapshot(*frame);
           } else if (frame->type == MsgType::State) {
             PayloadReader r(frame->payload);
             const bool scrolled = r.u8() & kStateScrolled;

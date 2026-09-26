@@ -83,10 +83,15 @@ Files:
   detach / quit (`-n`, `-a`, TUI attach and exited view, quit without
   attaching), `[detached ...]` on its own line, the app's alternate screen
   switches emulated (incl. other parameters in the same CSI, split across
-  reads, RIS), the outer mouse modes following the app, the wheel (scroll
-  mode, cursor keys on the app's alternate screen, split reports), scroll
-  mode keys, output withheld and the view anchored while scrolled, queries
-  answered while scrolled, detach while scrolled, scrolling the exited view.
+  reads, an unmatched exit), RIS replaced by a soft reset, `CSI 3 J` removed,
+  DECSTR / combined sequences keeping pmux's mouse, output resuming at a
+  sequence boundary after a snapshot, the outer mouse modes following the
+  app, the wheel (scroll mode, cursor keys on the app's alternate screen,
+  split reports), scroll mode keys, the scroll paint leaving input modes
+  alone, modes and colors the app reset while scrolled, the bell while
+  scrolled, output withheld and the view anchored while scrolled, queries
+  answered while scrolled, detach while scrolled, the exited view (scrolling,
+  never resizing the stored screen, pmux's mouse after its snapshot).
   A scripted app (`APP`) logs its input and runs `!X` commands from it.
 
 - `test_polish.py` — faint (SGR 2) restore incl. history and the app's

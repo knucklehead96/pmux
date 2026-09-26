@@ -41,6 +41,8 @@ class ModeTracker {
   std::string set_kitty(bool alt) const;
   // OSC 104;<idx> / 110 / 111 / 112 for colors the app set and has not reset.
   std::string color_resets() const;
+  // color_resets() of the colors a RIS reset since the last call.
+  std::string take_ris_color_resets() { return std::exchange(ris_color_resets_, {}); }
   // The app's mouse modes and cursor-key mode as STATE flags (without the alternate screen).
   ClientState client_state() const;
   bool kitty_differs() const { return kitty_main_.back() != kitty_alt_.back(); }
@@ -64,6 +66,7 @@ class ModeTracker {
   bool alt_requested_ = false;
   int alt_exit_ = 0;
   bool cursor_restore_ = false;
+  std::string ris_color_resets_;
 
   // Tracked state.
   bool alt_ = false;
@@ -120,18 +123,20 @@ class SgrRewriter {
 
 // Filters PTY output on its way to an attached client (never what libvterm is fed): removes
 // 47 / 1047 / 1049 from DEC private mode set / reset sequences (CSI ? ... h / l; other
-// parameters stay, the sequence is dropped if none is left), and stops after each of them and
-// after RIS so the caller can act on the new state in stream order. Other bytes pass through
-// unchanged. A possible start of such a sequence (ESC, ESC [, ESC [ ? ..., at most kMaxHeld
+// parameters stay, the sequence is dropped if none is left) and drops CSI 3 J (erase the
+// terminal's scrollback) and RIS, so the client's terminal stays on its alternate screen and
+// keeps the user's scrollback. Stops after each DEC private mode set / reset, DECSTR and RIS so
+// the caller can act on the new state in stream order. Other bytes pass through unchanged. A
+// possible start of such a sequence (ESC, ESC [, ESC [ ? ..., ESC [ digits, at most kMaxHeld
 // bytes) is held back until it is complete or take_held() gives it up.
 class OutputFilter {
  public:
   enum class Event {
     None,       // consumed everything
     Mode,       // a DEC private mode set / reset
-    Mouse,      // one that names a mouse tracking or encoding mode
+    Mouse,      // one that names a mouse tracking or encoding mode, or DECSTR
     AltScreen,  // one that switched the screen (47 / 1047 / 1049 were removed)
-    Reset,      // RIS
+    Reset,      // RIS (removed)
   };
   static constexpr std::size_t kMaxHeld = 32;
 
@@ -141,19 +146,28 @@ class OutputFilter {
   bool holding() const { return !held_.empty(); }
   // The held bytes, unchanged; the rest of their sequence then passes through unchanged too.
   std::string take_held();
+  // The client's terminal was just repainted from the model (which has seen every byte fed):
+  // output is dropped until the stream is back outside any escape sequence or UTF-8 character.
+  void resync();
 
  private:
-  enum class State { Ground, Esc, EscIntermediate, CsiStart, Csi, PrivateCsi, String, StringEsc };
+  enum class State { Ground, Esc, EscIntermediate, CsiStart, Csi, PlainCsi, PrivateCsi, String, StringEsc };
+  std::size_t feed_bytes(const char* data, std::size_t len, std::string& out, Event& event);
+  bool at_ground() const { return state_ == State::Ground && utf8_left_ == 0 && held_.empty(); }
   // Ends the sequence being held: its bytes go out unchanged.
   void release(std::string& out);
   Event finish_private(char final, std::string& out);
+  Event finish_plain(char final, std::string& out);
 
   State state_ = State::Ground;
   std::string held_;    // raw bytes of the sequence being held
-  std::string params_;  // its parameter bytes
+  std::string params_;  // its parameter bytes (at most kMaxParams)
   std::string c0_;      // C0 controls executed inside it
   bool plain_ = true;   // no intermediates or other odd bytes: may be rewritten
+  bool decstr_ = false;    // the intermediate is '!' (CSI ! p)
   bool released_ = false;  // take_held() gave the current sequence up
+  int utf8_left_ = 0;      // continuation bytes the current UTF-8 character still needs
+  bool skip_ = false;      // resync(): dropping output until at_ground()
 };
 
 // Per-session virtual terminal: libvterm screen, scrollback ring, mode tracker.
@@ -162,7 +176,7 @@ class Screen {
   // Output for an attached client, cut where its STATE changed.
   struct OutputPiece {
     std::string bytes;
-    bool reapply = false;  // RIS or a mouse mode: the client re-applies its mouse modes
+    bool reapply = false;  // RIS, DECSTR or a mouse mode: the client re-applies its mouse modes
   };
 
   // libvterm's size is clamped to [kMinRows..kMaxRows] x [kMinCols..kMaxCols]: libvterm 0.3.3
@@ -176,29 +190,40 @@ class Screen {
   Screen& operator=(const Screen&) = delete;
 
   // Feeds PTY output and appends the client's output to `out` (see OutputFilter): an alternate
-  // screen switch is followed by a repaint of the new screen, RIS by CSI ? 1049 h and a repaint.
+  // screen switch is followed by a repaint of the new screen; RIS is replaced by a soft reset
+  // (DECSTR, mode and color resets, kitty flags popped) and a repaint.
   // Terminal query replies generated by libvterm accumulate in replies().
   void feed(const char* data, std::size_t len, std::vector<OutputPiece>& out);
   // Held-back client output (see OutputFilter).
   bool holding() const { return filter_.holding(); }
   std::string take_held() { return filter_.take_held(); }
+  // After a snapshot: drop client output until the stream is outside any sequence again.
+  void resync_output() { filter_.resync(); }
   void resize(int rows, int cols);
   // Bytes that redraw the visible screen and modes on a terminal (DECSTR, clear, rows, cursor,
-  // modes, kitty flags, title and colors, pen). Non-interactive (read-only view): input-related
-  // modes and kitty flags are not restored. `fresh`: the terminal's kitty flags stack is empty
-  // (pushed then), else the current flags are set.
-  std::string snapshot(bool interactive, bool fresh = true);
+  // modes, kitty flags, title and colors, pen). `fresh`: the terminal has none of the app's
+  // modes (kitty flags are pushed), else every mode the snapshot may set is turned off first
+  // and the kitty flags are set.
+  std::string snapshot(bool fresh = true);
+  // A read-only view at rows x cols (the screen itself is not resized): the lines from
+  // view_top(rows) on, cut to cols; no input-related modes or kitty flags.
+  std::string view_snapshot(int rows, int cols) const;
   std::string color_resets() const { return modes_.color_resets(); }
   ClientState client_state() const;
 
   // Scroll mode. Lines are numbered for as long as the session lives: history holds
-  // [history_base(), history_end()), the screen's rows follow from history_end().
+  // [history_base(), history_end()), the screen's rows follow from history_end(). A view with
+  // `rows` rows shows the lines from view_top(rows) when not scrolled: the screen, with
+  // history above it when taller, without the blank rows below the content when shorter.
   std::uint64_t history_base() const { return dropped_; }
   std::uint64_t history_end() const { return dropped_ + scrollback_.size(); }
   std::size_t history_size() const { return scrollback_.size(); }
   int rows() const { return rows_; }
-  // Paints rows() lines from line `top` on (history, then the primary screen's rows).
-  std::string scroll_paint(std::uint64_t top) const;
+  int cols() const { return cols_; }
+  std::uint64_t view_top(int rows) const;
+  // Paints rows x cols from line `top` on (history, then the primary screen's rows). Leaves the
+  // terminal's input modes alone.
+  std::string scroll_paint(std::uint64_t top, int rows, int cols) const;
 
   std::string take_replies() { return std::exchange(replies_, {}); }
   bool take_bell() { return std::exchange(bell_, false); }
@@ -233,11 +258,17 @@ class Screen {
  private:
   Line read_row(int row) const;
   Pen current_pen() const;
+  void save_default_cursor();
   // Feeds libvterm and the mode tracker.
   void feed_model(const char* data, std::size_t len);
   void process(const char* data, std::size_t len);
   // Redraws the visible screen from the model: rows, cursor, pen (no modes).
   std::string repaint() const;
+  // rows x cols lines from `top` on; `primary`: the primary screen's rows even while the
+  // alternate screen is active.
+  void paint_lines(std::string& out, std::uint64_t top, int rows, int cols, bool primary) const;
+  void append_tail(std::string& out, std::uint64_t top, int rows, int cols, bool interactive,
+                   bool fresh) const;
   void reset_scroll_region();
   void resize_saved_primary(int rows);
   void repaint_primary(bool restore_cursor);

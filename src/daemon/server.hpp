@@ -34,7 +34,9 @@ class Server {
     std::size_t out_off = 0;
     std::uint32_t attached = 0;  // session id
     std::uint32_t viewing = 0;   // session id shown by VIEW
+    int view_rows = 0, view_cols = 0;  // the viewer's size
     std::optional<std::uint64_t> scroll_top;  // scroll mode: the line at the view's top
+    std::string scroll_color_resets;  // scroll mode: the color resets at its start
     std::optional<ClientState> state;  // the last STATE sent (frozen while scrolled)
     dev_t tty_rdev = 0;          // device of the tty the client attached from (0 = unknown)
     std::size_t snapshot_size = 0;  // the last snapshot sent; allowed on top of the queue limit
@@ -72,6 +74,9 @@ class Server {
   void send_scroll_state(Client& c, const Screen& screen);
   void do_scroll(Client& c, const Frame& frame);
   void exit_scroll(Client& c, Proc& p);
+  // Color resets for a client leaving a session: the colors the app changed, plus those it
+  // changed and reset while the client was scrolled (the terminal still has them).
+  static std::string client_color_resets(const Client& c, const Screen& screen);
   void flush_held(Proc& p);
   void do_resize(Client& c, const Frame& frame);
   void do_input(Client& c, const Frame& frame);

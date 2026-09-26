@@ -55,8 +55,8 @@ class Session {
   std::string fg_command() const;
 
   // Reads one chunk of PTY output and feeds it to the screen; `out` receives the client's
-  // output (see Screen::feed). While detached, BEL sets the bell flag; while detached or
-  // scrolled, terminal query replies go back to the PTY.
+  // output (see Screen::feed). While detached or scrolled, BEL sets the bell flag and terminal
+  // query replies go back to the PTY.
   ReadStatus read_output(std::vector<Screen::OutputPiece>& out, bool attached, bool scrolled);
   Screen& screen() { return *screen_; }
   void queue_input(std::string_view data);

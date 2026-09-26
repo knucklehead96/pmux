@@ -334,8 +334,9 @@ void Server::do_attach(Client& c, const Frame& frame) {
   }
   if (Client* prev = find_client(p->attached); prev && prev != &c) {
     prev->attached = 0;
+    const std::string resets = client_color_resets(*prev, p->session->screen());
     prev->scroll_top.reset();
-    send(*prev, make_frame(MsgType::Detach, PayloadWriter().str(p->session->screen().color_resets()).take()));
+    send(*prev, make_frame(MsgType::Detach, PayloadWriter().str(resets).take()));
   }
   p->attached = c.id;
   c.attached = id;
@@ -347,7 +348,8 @@ void Server::do_attach(Client& c, const Frame& frame) {
   // exactly one SIGWINCH: the kernel's if the size changed, else ours. (Both would reach it as
   // one or two signals depending on timing.)
   p->session->screen().resize(rows, cols);
-  send_snapshot(c, p->session->screen().snapshot(true));
+  send_snapshot(c, p->session->screen().snapshot());
+  p->session->screen().resync_output();
   send_state(c, p->session->screen(), true);
   if (!p->session->resize(rows, cols)) p->session->notify_winch();
   update_master_events(*p);
@@ -356,7 +358,7 @@ void Server::do_attach(Client& c, const Frame& frame) {
 void Server::do_detach(Client& c) {
   std::string resets;
   if (Proc* p = find_proc(c.attached); p && p->attached == c.id) {
-    resets = p->session->screen().color_resets();
+    resets = client_color_resets(c, p->session->screen());
     p->attached = 0;
     update_master_events(*p);
   }
@@ -376,11 +378,13 @@ void Server::do_view(Client& c, const Frame& frame) {
   Proc* p = r.ok() ? find_proc(id) : nullptr;
   if (!p) return send(c, error_frame("no such process"));
   Screen& screen = p->session->screen();
-  // An exited process's screen takes the viewer's size (a running one keeps its PTY's).
-  if (p->session->exited()) screen.resize(rows, cols);
+  // The stored screen is never resized for a viewer (libvterm would cut its lines for good):
+  // it is painted at the viewer's size.
   c.viewing = id;
+  c.view_rows = rows > 0 && cols > 0 ? rows : screen.rows();
+  c.view_cols = rows > 0 && cols > 0 ? cols : screen.cols();
   c.scroll_top.reset();
-  send_snapshot(c, screen.snapshot(false));
+  send_snapshot(c, screen.view_snapshot(c.view_rows, c.view_cols));
   send(c, ok_frame(PayloadWriter().str(screen.color_resets()).take()));
 }
 
@@ -401,13 +405,20 @@ void Server::send_state(Client& c, const Screen& screen, bool reapply) {
   send(c, make_frame(MsgType::State, w.take()));
 }
 
+std::string Server::client_color_resets(const Client& c, const Screen& screen) {
+  std::string resets = screen.color_resets();
+  if (c.scroll_top) resets += c.scroll_color_resets;
+  return resets;
+}
+
 void Server::send_scroll_state(Client& c, const Screen& screen) {
   const ClientState st = c.state.value_or(screen.client_state());
-  const std::uint64_t end = screen.history_end();
-  const std::uint64_t offset = c.scroll_top ? end - std::min(*c.scroll_top, end) : 0;
+  // The top line when not scrolled.
+  const std::uint64_t live = c.attached ? screen.history_end() : screen.view_top(c.view_rows);
+  const std::uint64_t offset = c.scroll_top ? live - std::min(*c.scroll_top, live) : 0;
   PayloadWriter w;
   w.u8(std::uint8_t(st.flags | (c.scroll_top ? kStateScrolled : 0))).u16(st.mouse);
-  w.u32(std::uint32_t(offset)).u32(std::uint32_t(screen.history_size()));
+  w.u32(std::uint32_t(offset)).u32(std::uint32_t(live - screen.history_base()));
   send(c, make_frame(MsgType::State, w.take()));
 }
 
@@ -419,9 +430,11 @@ void Server::do_scroll(Client& c, const Frame& frame) {
   Proc* p = find_proc(c.attached ? c.attached : c.viewing);
   if (!p || (c.attached && p->attached != c.id)) return;
   Screen& screen = p->session->screen();
+  const int rows = c.attached ? screen.rows() : c.view_rows;
+  const int cols = c.attached ? screen.cols() : c.view_cols;
   const std::uint64_t base = screen.history_base();
-  const std::uint64_t end = screen.history_end();  // the top of the live screen
-  const auto page = std::uint64_t(std::max(screen.rows() - 1, 1));
+  const std::uint64_t end = c.attached ? screen.history_end() : screen.view_top(rows);  // not scrolled
+  const auto page = std::uint64_t(std::max(rows - 1, 1));
   std::uint64_t top = std::clamp(c.scroll_top.value_or(end), base, end);
   switch (op) {
     case ScrollOp::Up: top -= std::min<std::uint64_t>(lines, top - base); break;
@@ -437,21 +450,24 @@ void Server::do_scroll(Client& c, const Frame& frame) {
     if (c.scroll_top) exit_scroll(c, *p);
     return;
   }
+  if (!c.scroll_top) c.scroll_color_resets = screen.color_resets();
   c.scroll_top = top;  // freezes c.state (see send_state)
-  send_snapshot(c, screen.scroll_paint(top));
+  send_snapshot(c, screen.scroll_paint(top, rows, cols));
   send_scroll_state(c, screen);
 }
 
-// Leaves scroll mode: paints the live screen and resumes the output.
+// Leaves scroll mode: paints the live screen and resumes the output. The terminal ends up in
+// exactly the app's current modes and colors, including ones the app reset meanwhile.
 void Server::exit_scroll(Client& c, Proc& p) {
   c.scroll_top.reset();
   Screen& screen = p.session->screen();
   if (!c.attached) {
-    send_snapshot(c, screen.snapshot(false));
+    send_snapshot(c, screen.view_snapshot(c.view_rows, c.view_cols));
     send_scroll_state(c, screen);
     return;
   }
-  send_snapshot(c, screen.snapshot(true, false));
+  send_snapshot(c, std::exchange(c.scroll_color_resets, {}) + screen.snapshot(false));
+  screen.resync_output();
   send_state(c, screen, true);
 }
 
@@ -689,9 +705,9 @@ void Server::finalize(Proc& p) {
   p.reap_deadline.reset();
   if (Client* c = find_client(p.attached)) {
     c->attached = 0;
+    const std::string resets = client_color_resets(*c, s.screen());
     c->scroll_top.reset();
-    send(*c, make_frame(MsgType::Exited,
-                        PayloadWriter().i32(s.exit_status()).str(s.screen().color_resets()).take()));
+    send(*c, make_frame(MsgType::Exited, PayloadWriter().i32(s.exit_status()).str(resets).take()));
   }
   p.attached = 0;
   // With the remove flag, remove_finished drops the entry at the end of this event pass, before

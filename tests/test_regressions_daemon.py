@@ -679,15 +679,18 @@ class DaemonHousekeeping(PmuxTestCase):
                "    while b: b = b[os.write(1, b):]\n"
                "w(b'before\\r\\n\\x1b[' + b' ' * %d + b'q' + b'after-runaway\\r\\n')\n"
                "w(b'\\x1b[' + b'1' * %d + b'mafter-digits\\r\\n')\n"
+               # the client output filter's DEC private mode parameters and C0 controls
+               "w(b'\\x1b[?' + b'1' * %d + b'hafter-private\\r\\n')\n"
+               "w(b'\\x1b[?' + b'\\x00' * %d + b'1hafter-c0\\r\\n')\n"
                "open(sys.argv[1], 'w').close()\n"
-               "os.execvp('sleep', ['sleep', '600'])\n" % (size, size))
+               "os.execvp('sleep', ['sleep', '600'])\n" % (size, size, size, size))
         done = self.px.path("gen.done")
         self.assertEqual(self.px.run("-n", "csi", "-d", "--", PYTHON, "-c", gen, done).returncode, 0)
         pid = self.px.daemon_pid()
         wait_until(lambda: os.path.exists(done), timeout=60)
         time.sleep(0.5)
         c = self.px.attach("csi")
-        read_until(c, b"after-digits")
+        read_until(c, b"after-c0")
         self.detach(c, "csi")
         hwm_kb = int(proc_status(pid)["VmHWM"].split()[0])
         self.assertLess(hwm_kb, 40 * 1024, "daemon peak RSS %d kB: CSI buffer not bounded" % hwm_kb)

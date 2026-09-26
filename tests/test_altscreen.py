@@ -6,9 +6,11 @@ import os
 import re
 import time
 
-from helpers import PMUX_BIN, PYTHON, read_file, read_until, wait_until
+from helpers import PMUX_BIN, PYTHON, drain, read_file, read_until, wait_until
 from test_restore import INDICATOR, RestoreCase
-from tui import dump
+from tui import dump, list_rows
+
+PMUX_MOUSE = b"\x1b[?1000h\x1b[?1006h"
 
 WHEEL_UP = b"\x1b[<64;10;10M"
 WHEEL_DOWN = b"\x1b[<65;10;10M"
@@ -74,6 +76,12 @@ class AltCase(RestoreCase):
 
     def log(self, name):
         return read_file(self.px.path(name + ".in"))
+
+    def out(self, name, data):
+        """Output from the app `name`: written to its terminal directly."""
+        tty = os.readlink("/proc/%d/fd/0" % int(read_file(self.px.path(name + ".ready"))))
+        with open(tty, "wb", buffering=0) as f:
+            f.write(data)
 
     def shell(self, rows=24, cols=80):
         """A tmux pane running sh with three marker lines on its screen."""
@@ -243,7 +251,22 @@ class AppAltScreen(AltCase):
         self.assertIn(b"\x1b[?2004;1004l", seg, "47 removed, the rest kept: %r" % seg)
         self.detach(c, "app")
 
-    def test_ris_keeps_the_alternate_screen(self):
+    def test_ris_replaced_by_a_soft_reset(self):
+        # RIS would leave the terminal's alternate screen and (VTE) erase the user's scrollback.
+        self.app("app")
+        c = self.raw_attach("app")
+        self.out("app", b"\x1b[?2004h\x1b]11;#123456\x07<ris>\x1bcAFTER-RIS</ris>")
+        data = read_until(c, b"</ris>")
+        seg = data[data.index(b"<ris>"):]
+        self.assertNotIn(b"\x1bc", seg, "RIS forwarded: %r" % seg)
+        reset = seg.index(b"\x1b[!p")
+        for seq in (b"\x1b[?2004l", b"\x1b[<99u", b"\x1b]111\x1b\\", PMUX_MOUSE, b"\x1b[1;1H\x1b[2K"):
+            self.assertGreater(seg.find(seq, reset), reset, "%r missing after the soft reset: %r" % (seq, seg))
+        self.assertLess(seg.index(PMUX_MOUSE), seg.index(b"AFTER-RIS"), seg)
+        self.assertNotIn(b"1049", seg, seg)
+        self.detach(c, "app")
+
+    def test_ris_in_tmux(self):
         self.app("app")
         t = self.attach_pane_app("app")
         t.type("!R")
@@ -251,6 +274,70 @@ class AppAltScreen(AltCase):
         f = t.fmt("alternate_on", "mouse_standard_flag", "mouse_sgr_flag")
         self.assertEqual(f, {"alternate_on": "1", "mouse_standard_flag": "1", "mouse_sgr_flag": "1"},
                          "pmux's screen and mouse after RIS")
+        self.detach_pane(t, "app")
+
+    def test_erase_scrollback_not_forwarded(self):
+        self.app("app")
+        c = self.raw_attach("app")
+        c.send(b"!H")
+        read_until(c, b"session 100")
+        self.out("app", b"<ed3>\x1b[H\x1b[2J\x1b[3J\x1b[3")
+        time.sleep(0.005)
+        self.out("app", b"JCLEARED\x1b[1;3Jx\x1b[0J</ed3>")
+        data = read_until(c, b"</ed3>")
+        seg = data[data.index(b"<ed3>"):]
+        self.assertEqual(seg, b"<ed3>\x1b[H\x1b[2JCLEARED\x1b[1;3Jx\x1b[0J</ed3>",
+                         "only CSI 3 J removed (also split across reads)")
+        # ... but the session's history is gone: the wheel has nothing to show.
+        c.send(b"\x1b[<64;1;1M!Z")
+        wait_until(lambda: self.log("app").endswith(b"!Z"), msg=lambda: "log %r" % self.log("app"))
+        time.sleep(0.2)
+        self.assertNotRegex(drain(c), rb" \d+/\d+ ", "scroll mode after clear")
+        self.detach(c, "app")
+
+    def test_combined_reset_keeps_pmux_mouse(self):
+        # 1049 together with mouse modes, the screen not switching: pmux must take the mouse back.
+        self.app("app")
+        t = self.attach_pane_app("app")
+        wait_until(lambda: t.fmt("mouse_sgr_flag")["mouse_sgr_flag"] == "1", msg="pmux's mouse")
+        self.out("app", b"\x1b[?1000;1006;1049l")
+        time.sleep(0.3)
+        f = t.fmt("mouse_standard_flag", "mouse_sgr_flag", "alternate_on")
+        self.assertEqual(f, {"mouse_standard_flag": "1", "mouse_sgr_flag": "1", "alternate_on": "1"})
+        self.detach_pane(t, "app")
+
+    def test_unmatched_alt_screen_exit_keeps_the_default_pen(self):
+        # Leaving an alternate screen never entered restores a cursor never saved: the default
+        # pen, not libvterm's zeroed one (black on black).
+        self.app("app")
+        c = self.raw_attach("app")
+        self.out("app", b"<rc>\x1b[?1049l</rc>")
+        data = read_until(c, b"</rc>")
+        seg = data[data.index(b"<rc>"):]
+        self.assertIn(b"\x1b[1;1H\x1b[2K", seg, "repaint")
+        self.assertNotIn(b"38;2;0;0;0", seg, seg)
+        self.detach(c, "app")
+
+    def test_decstr_keeps_pmux_mouse(self):
+        # DECSTR (tput init) turns the mouse modes off on some terminals: pmux sets them again.
+        self.app("app")
+        c = self.raw_attach("app")
+        self.out("app", b"<decstr>\x1b[!p</decstr>")
+        data = read_until(c, b"</decstr>")
+        seg = data[data.index(b"<decstr>"):]
+        self.assertIn(b"\x1b[!p" + PMUX_MOUSE, seg, "pmux's mouse right after the app's DECSTR")
+        self.detach(c, "app")
+
+    def test_output_resumes_at_a_sequence_boundary(self):
+        # Output that ended inside a sequence while detached: after the snapshot, its rest is
+        # not written as text.
+        self.app("app")
+        self.out("app", b"\x1b[38;5;1")
+        time.sleep(0.3)
+        t = self.attach_pane_app("app")
+        self.out("app", b"23mTEXT\x1b[0m\r\n")
+        lines = t.wait_for(lambda l: any("TEXT" in x for x in l), msg="output")
+        self.assertFalse(any("23m" in x for x in lines), dump(lines))
         self.detach_pane(t, "app")
 
 
@@ -440,6 +527,86 @@ class ScrollMode(AltCase):
         self.live(t)
         self.detach_pane(t, "app")
 
+    def test_scroll_paint_keeps_input_modes(self):
+        self.out("app", b"\x1b[?2004h")
+        c = self.px.attach("app")
+        c.delaybeforesend = None
+        c.send(b"!H")
+        read_until(c, b"session 100")
+        c.send(WHEEL_UP)
+        paint = read_until(c, b" 3/77 ")
+        self.assertNotIn(b"\x1b[!p", paint, "DECSTR resets bracketed paste / the mouse on VTE")
+        self.assertNotIn(b"\x1b[?2004l", paint)
+        c.send(b"\x1b[200~pasted\x1b[201~")   # a paste while scrolled: leaves scroll mode, reaches the app
+        wait_until(lambda: self.log("app").endswith(b"\x1b[200~pasted\x1b[201~"),
+                   msg=lambda: "log %r" % self.log("app"))
+        self.detach(c, "app")
+
+    def test_modes_turned_off_while_scrolled(self):
+        t = self.attached()
+        self.out("app", b"\x1b[?2004h\x1b[?1004h")
+        time.sleep(0.2)
+        t.raw(WHEEL_UP)
+        self.top(t, 75, 3)
+        self.out("app", b"\x1b[?2004l\x1b[?1004l")
+        time.sleep(0.2)
+        t.keys("q")
+        self.live(t)
+        time.sleep(0.2)
+        t.tmux("set-buffer", "PASTE")
+        t.tmux("paste-buffer", "-p", "-t", t.target)
+        wait_until(lambda: b"PASTE" in self.log("app"), msg=lambda: "log %r" % self.log("app"))
+        self.assertNotIn(b"\x1b[200~", self.log("app"), "bracketed paste still on")
+
+    def test_colors_reset_while_scrolled(self):
+        base = self.reference(b"x")["flags"]["pane_bg"]
+        for how in ("q", "detach"):
+            with self.subTest(how=how):
+                t = self.attached() if how == "q" else self.pane([PMUX_BIN, "-a", "app"])
+                self.wait_alt(t)
+                self.out("app", b"\x1b]11;#123456\x07" + (b"" if how == "q" else b"\r\n" * 30))
+                wait_until(lambda: t.fmt("pane_bg")["pane_bg"] == "#123456", msg="OSC 11")
+                t.raw(WHEEL_UP)
+                t.wait_for(lambda l: INDICATOR.search(l[0]), msg="scroll mode")
+                self.out("app", b"\x1b]111\x07")
+                time.sleep(0.2)
+                if how == "q":
+                    t.keys("q")
+                    t.wait_for(lambda l: not INDICATOR.search(l[0]), msg="live")
+                    wait_until(lambda: t.fmt("pane_bg")["pane_bg"] == base,
+                               msg=lambda: "pane_bg %r after leaving scroll mode" % t.fmt("pane_bg"))
+                    self.detach_pane(t, "app")
+                else:
+                    self.detach_pane(t, "app")
+                    self.assertEqual(t.fmt("pane_bg")["pane_bg"], base, "color left set after detach")
+
+    def test_output_resumes_at_a_sequence_boundary(self):
+        t = self.attached()
+        t.raw(WHEEL_UP)
+        self.top(t, 75, 3)
+        self.out("app", b"\x1b[38;5;1")   # while scrolled, a chunk ends inside an SGR
+        time.sleep(0.3)
+        t.keys("q")
+        self.live(t)
+        self.out("app", b"23mTEXT\x1b[0m\r\n")
+        lines = t.wait_for(lambda l: any("TEXT" in x for x in l), msg="output")
+        self.assertFalse(any("23m" in x for x in lines), dump(lines))
+        self.detach_pane(t, "app")
+
+    def test_bell_while_scrolled(self):
+        t = self.start_list("app", rows=24, cols=80)
+        t.keys("Enter")
+        t.wait_for(lambda l: not any("pmux" in x for x in l), msg="attached")
+        t.type("!H")
+        t.wait_for(lambda l: l[22] == "session 100")
+        t.raw(WHEEL_UP)
+        self.top(t, 75, 3)
+        self.out("app", b"\x07")
+        time.sleep(0.3)
+        self.detach_to_list(t, "app")
+        t.wait_for(lambda l: any(g == "!" and n == "app" for _i, g, n in list_rows(l)),
+                   msg="BEL while scrolled sets the bell flag")
+
     def test_detach_while_scrolled(self):
         t = self.shell()
         self.cli(t, "-a", "app")
@@ -458,6 +625,46 @@ class ScrollMode(AltCase):
 
 
 class ViewScroll(AltCase):
+    def test_view_does_not_resize_the_stored_screen(self):
+        # libvterm (no reflow) cuts lines for good when resized: viewing never resizes.
+        wide = "W" * 110
+        self.new_exited("wide", "printf '%s\\n'" % wide)   # created at 80 columns: wraps
+        go = self.px.path("go")
+        p = self.px.run("-n", "w120", "-d", "--", "sh", "-c",
+                        "while [ ! -e %s ]; do sleep 0.05; done; printf '%s\\n'" % (go, wide), cwd=self.api)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        a = self.pane([PMUX_BIN, "-a", "w120"], rows=24, cols=120)   # its screen at 120 columns
+        self.wait_alt(a)
+        time.sleep(0.3)
+        open(go, "w").close()
+        self.px.wait_state("w120", lambda s: s.startswith("exited"))
+        seen = []
+        for cols in (120, 50, 120):
+            t = self.start_list("w120", rows=24, cols=cols)
+            t.keys("End")   # the last row: w120
+            time.sleep(0.2)
+            t.keys("Enter")
+            lines = t.wait_for(lambda l: any(x.startswith("WWWW") for x in l), msg="view at %d" % cols)
+            seen.append(max(len(x) for x in lines if x.startswith("W")))
+            t.keys("Escape")
+            t.wait_list("w120")
+            t.close()
+        self.assertEqual(seen, [110, 50, 110], "line length shown at 120, 50, 120 columns")
+
+    def test_view_keeps_pmux_mouse(self):
+        self.new_exited("done", "echo hello")
+        c = self.px.spawn_attach([], rows=24, cols=80)
+        read_until(c, b"done")
+        time.sleep(0.3)
+        c.send(b"\r")
+        data = read_until(c, b"hello")
+        tail = read_until(c, PMUX_MOUSE)
+        self.assertIn(b"\x1b[!p", data + tail)
+        self.assertGreater((data + tail).rfind(PMUX_MOUSE), (data + tail).rfind(b"\x1b[!p"),
+                           "pmux's mouse after the snapshot's DECSTR")
+        c.send(b"\x1b")
+        read_until(c, b"done")
+
     def test_view_exited_scrolls(self):
         self.new_exited("done", "i=1; while [ $i -le 60 ]; do echo line $i; i=$((i+1)); done")
         t = self.start_list("done", rows=30, cols=80)
