@@ -816,7 +816,7 @@ void Tui::attach_to(const ProcInfo& proc, bool via_mouse) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       tcflush(STDIN_FILENO, TCIFLUSH);
     }
-    result = attach_session(fd.get(), id, config_.detach_key);
+    result = attach_session(fd.get(), id, config_);
   })();
   {
     std::lock_guard lock(poller_->m);
@@ -879,7 +879,7 @@ void Tui::view_exited(const ProcInfo& proc, bool via_mouse) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       tcflush(STDIN_FILENO, TCIFLUSH);
     }
-    result = view_session(fd.get(), id);
+    result = view_session(fd.get(), id, config_);
   })();
   {
     std::lock_guard lock(poller_->m);

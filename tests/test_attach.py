@@ -1,6 +1,7 @@
 """Attach behaviour: byte-exact passthrough, detach keys, resize, env, exits."""
 import os
 import random
+import re
 import time
 import unittest
 
@@ -23,9 +24,9 @@ class AttachCase(PmuxTestCase):
         p = self.px.run("-l")
         self.assertEqual(p.returncode, 0, "daemon start via -l failed: %r" % p.stderr)
 
-    def inlog(self, name="app"):
+    def inlog(self, name="app", mouse=False):
         log = self.px.path(name + ".in")
-        self.px.create_probe(name, "inlog", log)
+        self.px.create_probe(name, "inlog", log, *(["mouse"] if mouse else []))
         return log
 
     def sync(self, child, log, expected_prefix, token=b"<sync>"):
@@ -38,7 +39,8 @@ class AttachCase(PmuxTestCase):
 
 class InputTransparency(AttachCase):
     def test_all_bytes_and_escape_sequences(self):
-        log = self.inlog()
+        # The app tracks the mouse: mouse reports reach it too.
+        log = self.inlog(mouse=True)
         c = self.px.attach("app")
         expected = b""
         for part in input_corpus_chunks():
@@ -59,10 +61,12 @@ class OutputTransparency(AttachCase):
             b"\x1b[38;5;208m256\x1b[1;3;4;9mstyles\x1b[m\n",
             b"\x1b]8;;https://example.com/path?q=1\x1b\\link\x1b]8;;\x1b\\\n",
             b"\x1b]8;id=x;file:///tmp\x07bel-terminated\x1b]8;;\x07\n",
-            b"\x1b[?1049h\x1b[H\x1b[2Jalt screen\x1b[?1049l",
+            b"\x1b[?1004h\x1b[?2004;1004l",
             b"\x1b]0;window title\x07\x1b[?25l\x1b[?25h",
             "unicode ✻ ● ◌ ○ 😀 é\n".encode(),
-            rnd.randbytes(1 << 20),
+            # (alternate screen switches and RIS are the only sequences pmux rewrites; see
+            # test_altscreen)
+            re.sub(rb"(\x1b[\x00-\x1f\x7f]*)c", lambda m: m.group(1) + b"!", rnd.randbytes(1 << 20)),
             bytes(range(256)),
         ]
         data = b"".join(parts)

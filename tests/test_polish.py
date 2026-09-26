@@ -10,7 +10,7 @@ import unittest
 
 from helpers import (FAST, PMUX_BIN, REPO_DIR, TIMEOUT, probe, read_file, read_until,
                      wait_until)
-from test_restore import WINCH_MARK, RestoreCase
+from test_restore import WINCH_MARK, RestoreCase, split_snapshot
 from tui import DARK, TuiCase, color_close, dump, row_index
 
 # Row 0: faint, then normal.  Row 1: colors whose parameters contain a 2 that
@@ -68,12 +68,19 @@ class FaintRestore(RestoreCase):
             b"line %d\r\n" % i for i in range(40)) + b"\x1b[2mscreen-dim\x1b[0m\x1b[1;2m")
         self.draw("snap", script, winch=WINCH_MARK)
         c, snap, _ = self.attach_raw("snap")
-        self.assertIn(b"\x1b[0;2mhist-dim\x1b[0m hist-normal", snap)
-        self.assertIn(b"\x1b[0;2mscreen-dim\x1b[0m", snap)
-        self.assertTrue(snap.endswith(b"\x1b[0;1;2m"),
-                        "snapshot must end with the app's pen (bold+faint): %r" % snap[-40:])
-        bad = [p for p in sgr_params(snap) if p.split(b":")[0] in (b"10", b"11")]
-        self.assertEqual(bad, [], "snapshot must never contain SGR 10/11")
+        _, body, _ = split_snapshot(snap)
+        self.assertNotIn(b"hist-dim", body)
+        self.assertIn(b"\x1b[0;2mscreen-dim\x1b[0m", body)
+        self.assertTrue(body.endswith(b"\x1b[0;1;2m"),
+                        "snapshot must end with the app's pen (bold+faint): %r" % body[-40:])
+        # Scroll mode shows the history: wheel up, then Home (the top).
+        c.send(b"\x1b[<64;1;1M")
+        paint = read_until(c, b" 3/18 ")
+        c.send(b"\x1b[H")
+        paint += read_until(c, b" 18/18 ")
+        self.assertIn(b"\x1b[0;2mhist-dim\x1b[0m hist-normal", paint)
+        bad = [p for p in sgr_params(snap + paint) if p.split(b":")[0] in (b"10", b"11")]
+        self.assertEqual(bad, [], "snapshot / scroll paint must never contain SGR 10/11")
         self.detach_raw(c, "snap")
 
     def test_attached_output_is_byte_exact(self):

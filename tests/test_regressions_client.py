@@ -19,18 +19,19 @@ from helpers import (CTRL_BACKSLASH, CTRL_LEFT, CTRL_SHIFT_LEFT, DETACH, PMUX_BI
                      PmuxTestCase, expect_exit, read_file, read_until, wait_until)
 from tui import FOOTER_LIST, TmuxTui, TuiCase, parse_ansi_line, winch_marker
 
-# The exact reset sequence written on detach.
+# The exact reset sequence written on detach (no color resets): on the terminal's
+# alternate screen, then back to the main screen as the very last thing.
 MODE_RESETS = (b"\x1b[<99u"
-               b"\x1b[?1049l"
-               b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l"
+               b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+               b"\x1b[?1016l"
                b"\x1b[?1l\x1b>"
                b"\x1b[?2004l"
                b"\x1b[?1004l"
                b"\x1b[?25h"
                b"\x1b[?7h"
                b"\x1b[0m"
-               b"\x1b[<99u"
-               b"\x1b[>4m")
+               b"\x1b[>4m"
+               b"\x1b[?1049l")
 
 # FTXUI asks for the cursor shape (DECRQSS DECSCUSR) whenever the list resumes.
 CURSOR_SHAPE_REPLY = b"\x1bP1$r2 q\x1b\\"

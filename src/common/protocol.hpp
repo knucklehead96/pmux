@@ -21,13 +21,29 @@ namespace pmux {
 //               (exited: removes it; remove = 1: also removes it once it has exited, before OK)
 //   REMOVE      u32 id  (exited processes only)    -> OK | ERROR
 //   ATTACH      u32 id, u16 rows, u16 cols, str client tty path ("" if unknown)
-//                                                  -> OK, SNAPSHOT..., then OUTPUT... | ERROR
-//               (rows/cols in NEW, ATTACH and RESIZE are clamped to 500/1000 by the daemon)
-//   VIEW        u32 id  (read-only screen)         -> SNAPSHOT..., then OK(str color resets) | ERROR
+//                                                  -> OK, SNAPSHOT..., STATE, then OUTPUT / STATE /
+//                                                     SNAPSHOT... | ERROR
+//               (rows/cols in NEW, ATTACH, VIEW and RESIZE are clamped to 500/1000 by the daemon)
+//               The client shows the session on its terminal's alternate screen. The app's own
+//               alternate screen switches (DEC private modes 47 / 1047 / 1049) are removed from
+//               OUTPUT and followed by a repaint of the screen the app switched to; RIS is
+//               followed by CSI ? 1049 h and a repaint. Everything else in OUTPUT is the app's
+//               output, byte-exact.
+//   VIEW        u32 id [, u16 rows, u16 cols]  (read-only screen; an exited process's screen is
+//               resized to rows x cols first)  -> SNAPSHOT..., then OK(str color resets) | ERROR
 //   RESIZE      u16 rows, u16 cols
-//   INPUT       raw bytes (client -> daemon)
+//   INPUT       raw bytes (client -> daemon); ends scroll mode first
 //   OUTPUT      raw bytes (daemon -> client)
 //   SNAPSHOT    raw bytes (daemon -> client): screen restore, written verbatim; may span frames
+//   STATE       daemon -> client: u8 flags, u16 app mouse tracking mode (0 / 9 / 1000 / 1002 /
+//               1003), u32 scroll offset (lines above the live screen), u32 history lines
+//               flags: StateFlag. Sent after every SNAPSHOT (with Reapply) and, in stream order
+//               with OUTPUT, whenever the flags or the mouse mode change. While scrolled the
+//               app's modes are frozen at their values on entry and OUTPUT is withheld.
+//   SCROLL      client -> daemon: u8 ScrollOp, u16 lines (Up / Down)
+//               Scroll mode (per client, attached or viewing): the daemon paints the view with
+//               SNAPSHOT and sends STATE with Scrolled set; reaching the bottom (or Exit) paints
+//               the live screen (a snapshot; no SIGWINCH) and resumes OUTPUT.
 //   DETACH      client -> daemon: -  (detach request; answered with DETACH)
 //               daemon -> client: str color resets  (reply, or attached elsewhere)
 //   EXITED      i32 wait status, str color resets
@@ -53,6 +69,28 @@ enum class MsgType : std::uint8_t {
   Ok,
   View,
   Stop,
+  State,
+  Scroll,
+};
+
+// STATE flags.
+enum StateFlag : std::uint8_t {
+  kStateMouseSgr = 1 << 0,     // the app has ?1006 (SGR mouse encoding)
+  kStateMouseUtf8 = 1 << 1,    // ?1005
+  kStateMouseUrxvt = 1 << 2,   // ?1015
+  kStateAltScreen = 1 << 3,    // the app is on its alternate screen
+  kStateCursorKeys = 1 << 4,   // DECCKM (?1)
+  kStateScrolled = 1 << 5,     // the client is in scroll mode
+  kStateReapply = 1 << 6,      // the terminal's modes were (re)set: apply the mouse modes again
+  kStateMousePixels = 1 << 7,  // ?1016
+};
+
+enum class ScrollOp : std::uint8_t { Up = 1, Down, PageUp, PageDown, Top, Bottom, Exit };
+
+struct ClientState {
+  std::uint8_t flags = 0;  // StateFlag, without Scrolled / Reapply
+  std::uint16_t mouse = 0;
+  bool operator==(const ClientState&) const = default;
 };
 
 struct Frame {

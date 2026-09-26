@@ -31,7 +31,7 @@ import pexpect
 
 from helpers import (PMUX_BIN, PROBE, PYTHON, TIMEOUT, PmuxTestCase, pid_alive, read_file,
                      read_until, wait_until)
-from test_restore import WINCH_MARK, RestoreCase, numbered, pane_state
+from test_restore import WINCH_MARK, RestoreCase, numbered, pane_state, split_snapshot
 from tui import TuiCase, dump
 
 # Message types (src/common/protocol.hpp).
@@ -340,22 +340,24 @@ class AltScreenResize(RestoreCase):
     def check(self, script, rows, cols):
         (ref, ref_hist) = self.reference(script, rows, cols)
         self.assertEqual(ref["flags"]["alternate_on"], "0", "reference sanity")
+        self.assertEqual(ref_hist[-1], "", "reference sanity")
+        ref_history = ref_hist[:-(rows + 1)]   # without the screen
         pid = self.create_sized("app", script, 30, 100)
         t = self.attach_pane("app", rows, cols)
         t.wait_for(lambda l: any("ALT-CONTENT" in x for x in l), msg="pmux alt screen")
         self.leave_alt(pid, "app")
         t.wait_for(lambda l: any("after-alt 2" in x for x in l), msg="pmux left alt screen")
         self.assertPaneMatches(t, ref, "after leaving the alternate screen at %dx%d" % (cols, rows))
-        _, hist = self.settled(t)
-        self.assertEqual(hist, ref_hist, "history + screen\n%s\n%s" % (dump(ref_hist, "expected"),
-                                                                        dump(hist, "actual")))
+        hist = self.scroll_history(t, rows)
+        self.assertEqual(hist, ref_history, "history (scroll mode)\n%s\n%s"
+                         % (dump(ref_history, "expected"), dump(hist, "actual")))
         # libvterm's own primary screen now matches too: a reattach shows the same.
         self.detach_pane(t, "app")
         t = self.attach_pane("app", rows, cols)
         self.assertPaneMatches(t, ref, "reattach after leaving the alternate screen")
-        _, hist = self.settled(t)
-        self.assertEqual(hist, ref_hist, "history after reattach\n%s\n%s"
-                         % (dump(ref_hist, "expected"), dump(hist, "actual")))
+        hist = self.scroll_history(t, rows)
+        self.assertEqual(hist, ref_history, "history after reattach\n%s\n%s"
+                         % (dump(ref_history, "expected"), dump(hist, "actual")))
         self.detach_pane(t, "app")
 
     def test_history_bigger(self):
@@ -400,6 +402,7 @@ class Ris(RestoreCase):
         self.draw("ris", self.SCRIPT, winch=WINCH_MARK)
         c, snap, _ = self.attach_raw("ris")
         self.detach_raw(c, "ris")
+        _, snap, _ = split_snapshot(snap)
         self.assertNotIn(b"\x1b[?1049h", snap, "snapshot still in the alternate screen")
         self.assertNotIn(b"ALT-TEXT", snap)
         self.assertNotIn(b"\x1b[?2004h", snap, "bracketed paste survived RIS")
@@ -412,8 +415,9 @@ class Ris(RestoreCase):
         t = self.attach_pane("ris")
         lines = t.wait_for(lambda l: l[:3] == ["after-ris %d" % i for i in (1, 2, 3)], msg="screen after RIS")
         self.assertFalse(any("ALT-TEXT" in l for l in lines), dump(lines))
+        # (attached: the terminal's alternate screen is pmux's)
         self.assertEqual(t.fmt("alternate_on", "keypad_cursor_flag"),
-                         {"alternate_on": "0", "keypad_cursor_flag": "0"})
+                         {"alternate_on": "1", "keypad_cursor_flag": "0"})
         self.assertEqual(t.cursor(), (0, 3))
 
 

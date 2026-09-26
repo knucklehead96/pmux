@@ -35,6 +35,8 @@ constexpr std::size_t kSnapshotChunk = 1 << 20;
 // A client whose unsent output (beyond its last snapshot), or whose session's unwritten input,
 // exceeds this is dropped.
 constexpr std::size_t kMaxQueue = std::size_t(64) << 20;
+// Client output held back as the possible start of an alternate screen switch is sent after this.
+constexpr auto kHoldTime = std::chrono::milliseconds(20);
 
 enum class Tag : std::uint64_t { Listen = 1, Signal, Client, Master };
 
@@ -225,6 +227,7 @@ void Server::handle_frame(Client& c, const Frame& frame) {
     case MsgType::Kill: do_kill(c, frame); break;
     case MsgType::Remove: do_remove(c, frame); break;
     case MsgType::Stop: do_stop(c, frame); break;
+    case MsgType::Scroll: do_scroll(c, frame); break;
     default: send(c, error_frame("unsupported request")); break;
   }
 }
@@ -331,10 +334,13 @@ void Server::do_attach(Client& c, const Frame& frame) {
   }
   if (Client* prev = find_client(p->attached); prev && prev != &c) {
     prev->attached = 0;
+    prev->scroll_top.reset();
     send(*prev, make_frame(MsgType::Detach, PayloadWriter().str(p->session->screen().color_resets()).take()));
   }
   p->attached = c.id;
   c.attached = id;
+  c.viewing = 0;
+  c.scroll_top.reset();
   p->session->clear_bell();
   send(c, ok_frame());
   // Resize the screen to the client size and snapshot first; then resize the PTY. The app gets
@@ -342,6 +348,7 @@ void Server::do_attach(Client& c, const Frame& frame) {
   // one or two signals depending on timing.)
   p->session->screen().resize(rows, cols);
   send_snapshot(c, p->session->screen().snapshot(true));
+  send_state(c, p->session->screen(), true);
   if (!p->session->resize(rows, cols)) p->session->notify_winch();
   update_master_events(*p);
 }
@@ -354,15 +361,25 @@ void Server::do_detach(Client& c) {
     update_master_events(*p);
   }
   c.attached = 0;
+  c.scroll_top.reset();
   send(c, make_frame(MsgType::Detach, PayloadWriter().str(resets).take()));
 }
 
 void Server::do_view(Client& c, const Frame& frame) {
   PayloadReader r(frame.payload);
   const std::uint32_t id = r.u32();
+  int rows = 0, cols = 0;
+  if (!r.at_end()) {  // optional for older clients
+    rows = clamp_rows(r.u16());
+    cols = clamp_cols(r.u16());
+  }
   Proc* p = r.ok() ? find_proc(id) : nullptr;
   if (!p) return send(c, error_frame("no such process"));
   Screen& screen = p->session->screen();
+  // An exited process's screen takes the viewer's size (a running one keeps its PTY's).
+  if (p->session->exited()) screen.resize(rows, cols);
+  c.viewing = id;
+  c.scroll_top.reset();
   send_snapshot(c, screen.snapshot(false));
   send(c, ok_frame(PayloadWriter().str(screen.color_resets()).take()));
 }
@@ -373,17 +390,85 @@ void Server::send_snapshot(Client& c, const std::string& bytes) {
     send(c, bytes_frame(MsgType::Snapshot, std::string_view(bytes).substr(off, kSnapshotChunk)));
 }
 
+void Server::send_state(Client& c, const Screen& screen, bool reapply) {
+  if (c.scroll_top) return;  // frozen until scroll mode ends
+  const ClientState st = screen.client_state();
+  if (!reapply && c.state == st) return;
+  c.state = st;
+  PayloadWriter w;
+  w.u8(std::uint8_t(st.flags | (reapply ? kStateReapply : 0))).u16(st.mouse);
+  w.u32(0).u32(std::uint32_t(screen.history_size()));
+  send(c, make_frame(MsgType::State, w.take()));
+}
+
+void Server::send_scroll_state(Client& c, const Screen& screen) {
+  const ClientState st = c.state.value_or(screen.client_state());
+  const std::uint64_t end = screen.history_end();
+  const std::uint64_t offset = c.scroll_top ? end - std::min(*c.scroll_top, end) : 0;
+  PayloadWriter w;
+  w.u8(std::uint8_t(st.flags | (c.scroll_top ? kStateScrolled : 0))).u16(st.mouse);
+  w.u32(std::uint32_t(offset)).u32(std::uint32_t(screen.history_size()));
+  send(c, make_frame(MsgType::State, w.take()));
+}
+
+void Server::do_scroll(Client& c, const Frame& frame) {
+  PayloadReader r(frame.payload);
+  const auto op = static_cast<ScrollOp>(r.u8());
+  const std::uint16_t lines = r.at_end() ? 1 : r.u16();
+  if (!r.ok()) return;
+  Proc* p = find_proc(c.attached ? c.attached : c.viewing);
+  if (!p || (c.attached && p->attached != c.id)) return;
+  Screen& screen = p->session->screen();
+  const std::uint64_t base = screen.history_base();
+  const std::uint64_t end = screen.history_end();  // the top of the live screen
+  const auto page = std::uint64_t(std::max(screen.rows() - 1, 1));
+  std::uint64_t top = std::clamp(c.scroll_top.value_or(end), base, end);
+  switch (op) {
+    case ScrollOp::Up: top -= std::min<std::uint64_t>(lines, top - base); break;
+    case ScrollOp::Down: top = std::min<std::uint64_t>(top + lines, end); break;
+    case ScrollOp::PageUp: top -= std::min(page, top - base); break;
+    case ScrollOp::PageDown: top = std::min(top + page, end); break;
+    case ScrollOp::Top: top = base; break;
+    case ScrollOp::Bottom:
+    case ScrollOp::Exit: top = end; break;
+    default: return;
+  }
+  if (top >= end) {
+    if (c.scroll_top) exit_scroll(c, *p);
+    return;
+  }
+  c.scroll_top = top;  // freezes c.state (see send_state)
+  send_snapshot(c, screen.scroll_paint(top));
+  send_scroll_state(c, screen);
+}
+
+// Leaves scroll mode: paints the live screen and resumes the output.
+void Server::exit_scroll(Client& c, Proc& p) {
+  c.scroll_top.reset();
+  Screen& screen = p.session->screen();
+  if (!c.attached) {
+    send_snapshot(c, screen.snapshot(false));
+    send_scroll_state(c, screen);
+    return;
+  }
+  send_snapshot(c, screen.snapshot(true, false));
+  send_state(c, screen, true);
+}
+
 void Server::do_resize(Client& c, const Frame& frame) {
   PayloadReader r(frame.payload);
   const int rows = clamp_rows(r.u16());
   const int cols = clamp_cols(r.u16());
   Proc* p = find_proc(c.attached);
-  if (r.ok() && p) p->session->resize(rows, cols);
+  if (!r.ok() || !p) return;
+  p->session->resize(rows, cols);
+  if (c.scroll_top) exit_scroll(c, *p);
 }
 
 void Server::do_input(Client& c, const Frame& frame) {
   Proc* p = find_proc(c.attached);
   if (!p) return;
+  if (c.scroll_top) exit_scroll(c, *p);
   if (p->session->pending_input() + frame.payload.size() > kMaxQueue) {
     c.dead = true;  // the process is not reading its input
     return;
@@ -540,18 +625,35 @@ void Server::on_master_event(std::uint32_t id, std::uint32_t events) {
 
 void Server::read_master(Proc& p) {
   Session& s = *p.session;
-  std::string chunk;
+  std::vector<Screen::OutputPiece> pieces;
   for (int i = 0; i < 16 && !output_paused(p); ++i) {
-    const auto status = s.read_output(chunk, p.attached != 0);
+    Client* c = find_client(p.attached);
+    const bool scrolled = c && c->scroll_top;
+    const auto status = s.read_output(pieces, p.attached != 0, scrolled);
     if (status == Session::ReadStatus::Again) break;
     if (status == Session::ReadStatus::Eof) {
       close_master(p);
       if (s.reaped()) finalize(p);
       return;
     }
-    if (Client* c = find_client(p.attached)) send(*c, bytes_frame(MsgType::Output, chunk));
+    // Output is withheld from a client in scroll mode; it gets a snapshot when that ends.
+    if (c && !scrolled) {
+      for (const auto& piece : pieces) {
+        if (!piece.bytes.empty()) send(*c, bytes_frame(MsgType::Output, piece.bytes));
+        send_state(*c, s.screen(), piece.reapply);
+      }
+    }
   }
+  if (!s.screen().holding()) p.held_deadline.reset();
+  else if (!p.held_deadline) p.held_deadline = Clock::now() + kHoldTime;
   update_master_events(p);
+}
+
+void Server::flush_held(Proc& p) {
+  p.held_deadline.reset();
+  const std::string held = p.session->screen().take_held();
+  Client* c = find_client(p.attached);
+  if (c && !c->scroll_top && !held.empty()) send(*c, bytes_frame(MsgType::Output, held));
 }
 
 void Server::close_master(Proc& p) {
@@ -587,6 +689,7 @@ void Server::finalize(Proc& p) {
   p.reap_deadline.reset();
   if (Client* c = find_client(p.attached)) {
     c->attached = 0;
+    c->scroll_top.reset();
     send(*c, make_frame(MsgType::Exited,
                         PayloadWriter().i32(s.exit_status()).str(s.screen().color_resets()).take()));
   }
@@ -608,6 +711,7 @@ void Server::remove_finished() {
 void Server::run_timers() {
   const auto now = Clock::now();
   for (auto& [id, p] : procs_) {
+    if (p.held_deadline && now >= *p.held_deadline) flush_held(p);
     if (p.kill_deadline && now >= *p.kill_deadline) {
       p.kill_deadline.reset();
       p.session->force_kill();
@@ -623,7 +727,7 @@ void Server::run_timers() {
 int Server::timeout_ms() const {
   std::optional<Clock::time_point> next;
   for (const auto& [id, p] : procs_)
-    for (const auto& d : {p.kill_deadline, p.reap_deadline})
+    for (const auto& d : {p.kill_deadline, p.reap_deadline, p.held_deadline})
       if (d && (!next || *d < *next)) next = d;
   if (!next) return -1;
   const auto ms = std::chrono::ceil<std::chrono::milliseconds>(*next - Clock::now()).count();

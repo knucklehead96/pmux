@@ -13,7 +13,8 @@ A terminal process multiplexer. It keeps long-running processes alive in the bac
 - **One list, grouped by directory.** A Claude Code-style list shows every process under the directory where it was started, along with its current foreground command and its age.
 - **Status at a glance.** `●` means running, `!` means it rang the bell while you were away, and `○` means it exited (with the exit code or signal).
 - **Byte-exact attach.** When you attach, the process gets the whole terminal: no status bar and no border. Every byte you type goes straight to it, except for one detach key (`Ctrl+←` by default).
-- **Screen and scrollback restore.** The daemon keeps a libvterm screen for every process. On reattach, pmux restores the screen, the scrollback (into your terminal's native scrollback), the cursor and the terminal modes. This works for full-screen apps on the alternate screen too.
+- **Your shell stays clean.** Like tmux, pmux shows the process on the terminal's alternate screen. After you detach or quit, your shell's screen and scrollback are exactly as you left them.
+- **Screen and scrollback restore.** The daemon keeps a libvterm screen and history for every process. On reattach, pmux restores the screen, the cursor and the terminal modes, and the mouse wheel scrolls back through the history. This works for full-screen apps on the alternate screen too.
 - **Processes outlive the UI.** Processes keep running after you quit the list or close the terminal.
 - **Automatic dark/light theme.** pmux reads the terminal's background color and picks a matching palette. There are four accent colors and a 16-color `ansi` theme.
 - **One small binary.** The same executable is both the daemon and the client, and the config file is optional.
@@ -102,7 +103,7 @@ The default build type is `Release`. To build the release binaries yourself, run
 | Key | Action |
 |---|---|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Select a process |
-| `Enter`, double-click | Attach. On an exited process, this shows its final screen and history read-only. |
+| `Enter`, double-click | Attach. On an exited process, this shows its final screen read-only: the mouse wheel, `↑` `↓` `PgUp` `PgDn` `Home` `End` scroll through its history, and any other key returns to the list. |
 | `Ctrl+N` | New process: a dialog with Name, Dir and Command fields |
 | `Ctrl+R` | Rename the selected process |
 | `Ctrl+X` twice | Kill the selected process and remove it. On an exited process, this just removes it. Any other key, or waiting 2 s, cancels. |
@@ -112,7 +113,13 @@ The default build type is `Release`. To build the release binaries yourself, run
 
 ### While attached
 
-pmux intercepts only the detach key, which is `Ctrl+←` by default. Every other key, mouse event, paste and focus event goes to the process unchanged. Mouse-wheel scrolling uses your terminal's own scrollback.
+pmux intercepts only the detach key, which is `Ctrl+←` by default, and, while the app doesn't use the mouse, mouse events. Every other key, paste and focus event goes to the process unchanged.
+
+When the app turns on mouse tracking (vim with `mouse=a`, for example), it gets every mouse event unchanged. Otherwise pmux takes the mouse:
+
+- On the app's normal screen (a shell, a build log), the wheel enters **scroll mode**: the view shows the process's history, frozen while new output is held back, with the position (lines back / history lines) in the top-right corner. The wheel, `↑` `↓` (one line), `PgUp` `PgDn` (one page), `Home` (the oldest line) and `End` scroll. Scrolling to the bottom, `End`, `Esc` or `q` leaves scroll mode. Any other key leaves it and goes to the app.
+- On the app's alternate screen (`less`, `man`), the wheel sends `↑` / `↓` three times, as most terminals do.
+- Clicks and drags are ignored. To select text with your terminal, hold `Shift` while dragging (most terminals bypass mouse reporting then).
 
 Because pmux intercepts the detach key, the attached app never receives it. Shells and editors use `Ctrl+←` to move one word left, so if you need that, set `detach_key` to `ctrl+shift+left` or `ctrl+backslash`. On the Linux virtual console (no X or Wayland), `Ctrl+←` sends the same bytes as `←`, so use `detach_key = ctrl+backslash` there.
 
@@ -144,13 +151,13 @@ The daemon logs startup and fatal errors to `~/.pmux/daemon.log`.
 
 `pmux` is a single binary with two roles. The first command you run starts the daemon (fork + `setsid`), which runs a single-threaded `epoll` loop. The daemon owns a PTY for each process. Clients (the list and the CLI) talk to it over a Unix socket that only you can access: `$XDG_RUNTIME_DIR/pmux/pmux.sock`, or `/tmp/pmux-$UID/pmux.sock`, in a `0700` directory with a peer-uid check.
 
-All of a process's output goes into its own libvterm screen with a scrollback ring buffer, whether a client is attached or not. A small parser also tracks the state libvterm doesn't expose: mouse and paste modes, application keys, kitty keyboard flags, the title and color changes. When you attach, the daemon resizes that screen to your terminal and sends a snapshot of the history, screen, cursor and modes. After that, it forwards the PTY output unchanged.
+All of a process's output goes into its own libvterm screen with a scrollback ring buffer, whether a client is attached or not. A small parser also tracks the state libvterm doesn't expose: mouse and paste modes, application keys, kitty keyboard flags, the title and color changes. When you attach, the client switches your terminal to its alternate screen, and the daemon resizes the process's screen to your terminal and sends a snapshot of the screen, cursor and modes. After that, it forwards the PTY output unchanged, except for the app's own alternate screen switches: terminals can't nest alternate screens, so pmux drops them and repaints the screen the app switched to from libvterm. On detach, the client resets the modes and returns to your terminal's normal screen.
 
 The attached app behaves as if it were running directly in your terminal:
 
-- **Output is byte-for-byte.** Between the restore on attach and the detach, pmux writes nothing of its own. It never sends a full reset (RIS).
-- **Input is byte-for-byte.** Everything except the detach key reaches the app, and the app gets the full terminal size.
-- **Your real terminal answers queries.** The app's queries (DA, DSR, OSC 11, kitty keyboard, XTVERSION) are answered by your terminal. While the process is detached, libvterm answers the basic ones so apps don't hang.
+- **Output is byte-for-byte.** Between the restore on attach and the detach, pmux writes nothing of its own, apart from the alternate screen repaints, its mouse modes and scroll mode. It never sends a full reset (RIS).
+- **Input is byte-for-byte.** Everything except the detach key (and the mouse, while the app doesn't track it) reaches the app, and the app gets the full terminal size.
+- **Your real terminal answers queries.** The app's queries (DA, DSR, OSC 11, kitty keyboard, XTVERSION) are answered by your terminal. While the process is detached or you are in scroll mode, libvterm answers the basic ones so apps don't hang.
 - **Detaching is invisible to the app.** The PTY stays open and the app gets no `SIGHUP`. pmux adds no environment variables or wrapper processes, and the app keeps your real `TERM` and `COLORTERM`. On detach, pmux undoes the app's modes and color changes, so the list always comes back clean.
 
 ## Limitations
@@ -160,6 +167,7 @@ The attached app behaves as if it were running directly in your terminal:
 - Some terminal state isn't restored on reattach: OSC 8 hyperlinks, underline color, scroll margins, character sets, and alternate fonts.
 - Long lines are not reflowed when the terminal size changes between attaches.
 - The attached app never receives the detach key (see [While attached](#while-attached)).
+- The process's history is in pmux's scroll mode, not in your terminal's own scrollback, so your terminal's search and scrollbar don't see it.
 - A process keeps the `TERM` of the terminal that created it, even if you attach from a different terminal type. tmux and screen behave the same way.
 
 ## Development

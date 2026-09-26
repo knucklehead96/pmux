@@ -448,7 +448,10 @@ class Navigation(TuiCase):
                            msg="final screen of the selected exited process")
         self.assertFalse(lines[0].startswith(" ✻ pmux"), "final screen, not the list\n" + dump(lines))
         self.assertFalse(any("first-output" in x for x in lines), dump(lines))
-        t.keys("Up")                        # closes the view; must not move the selection
+        t.keys("Up")                        # scrolls (nothing to scroll to)
+        time.sleep(0.3)
+        self.assertFalse(t.screen()[0].startswith(" ✻ pmux"), "Up closed the view\n" + dump(t.screen()))
+        t.keys("Escape")                    # closes the view; must not reach the list
         t.wait_list("first", "done")
         self.wait_selected(t, "done")
         self.assertNotIn("has exited", t.footer(), dump(t.screen()))
@@ -981,7 +984,7 @@ class TuiPassthrough(TuiCase):
 
     def test_input_is_byte_exact(self):
         log = self.px.path("tapp.in")
-        self.px.create_probe("tapp", "inlog", log, winch_mark="tapp")
+        self.px.create_probe("tapp", "inlog", log, "mouse", winch_mark="tapp")
         c, _ = self.open_list("tapp")
         c.send(b"\r")
         read_until(c, winch_marker("tapp").encode())
@@ -1002,7 +1005,7 @@ class TuiPassthrough(TuiCase):
         corpus = (bytes(range(256)) * 4
                   + b"\x1b[38;2;255;100;0mtruecolor\x1b[48;5;17m256\x1b[0m\r\n"
                   + b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\r\n"
-                  + b"\x1b[?1049h\x1b[H\x1b[2Jalt\x1b[?1049l\x1b]0;title\x07"
+                  + b"\x1b[?2004h\x1b[H\x1b[2Jalt\x1b[?2004l\x1b]0;title\x07"
                   + "unicode ✻ ● ◌ ○ 😀 é\r\n".encode()
                   + bytes((i * 7 + 3) % 256 for i in range(65536)))
         for m in (probe.START_MARKER, probe.END_MARKER):

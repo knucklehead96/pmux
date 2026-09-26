@@ -33,6 +33,9 @@ class Server {
     std::string out;
     std::size_t out_off = 0;
     std::uint32_t attached = 0;  // session id
+    std::uint32_t viewing = 0;   // session id shown by VIEW
+    std::optional<std::uint64_t> scroll_top;  // scroll mode: the line at the view's top
+    std::optional<ClientState> state;  // the last STATE sent (frozen while scrolled)
     dev_t tty_rdev = 0;          // device of the tty the client attached from (0 = unknown)
     std::size_t snapshot_size = 0;  // the last snapshot sent; allowed on top of the queue limit
     bool want_write = false;
@@ -46,6 +49,7 @@ class Server {
     std::vector<std::uint32_t> kill_waiters;
     std::optional<Clock::time_point> kill_deadline;
     std::optional<Clock::time_point> reap_deadline;
+    std::optional<Clock::time_point> held_deadline;  // flush the client output held back
     bool remove_when_exited = false;  // KILL with the remove flag
     std::uint32_t events = 0;  // current epoll interest on the master
   };
@@ -64,6 +68,11 @@ class Server {
   void do_detach(Client& c);
   void do_view(Client& c, const Frame& frame);
   void send_snapshot(Client& c, const std::string& bytes);
+  void send_state(Client& c, const Screen& screen, bool reapply);
+  void send_scroll_state(Client& c, const Screen& screen);
+  void do_scroll(Client& c, const Frame& frame);
+  void exit_scroll(Client& c, Proc& p);
+  void flush_held(Proc& p);
   void do_resize(Client& c, const Frame& frame);
   void do_input(Client& c, const Frame& frame);
   void do_kill(Client& c, const Frame& frame);

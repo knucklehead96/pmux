@@ -65,7 +65,8 @@ Files:
 - `test_config.py` — config file: warnings (incl. `detach_key`),
   `default_cmd`, `default_dir`.
 - `test_restore.py` — restore: screen/attribute/cursor restore (CLI and TUI),
-  output while detached, native scrollback and `scrollback_lines`
+  output while detached, history (never in the native scrollback; scroll
+  mode) and `scrollback_lines`
   (incl. 0 and invalid values), alt screen, modes, OSC 4/10/11/12 replay and
   reset, title, snapshot prologue / no RIS, query replies (detached:
   libvterm; attached: the real terminal only), bell only while detached,
@@ -75,6 +76,18 @@ Files:
   pmux.  Raw tests find the end of the snapshot by a DCS marker the probe
   prints on SIGWINCH (pmux signals the app on attach, after the snapshot).
   `RestoreHarnessSelfTest` validates the probe and oracle without pmux.
+  While attached, a pmux pane is on tmux's alternate screen and has pmux's
+  mouse modes when the app tracks none (`attached_state` adjusts the
+  reference); `scroll_history` reads a session's history through scroll mode.
+- `test_altscreen.py` — the shell's screen and scrollback survive attach /
+  detach / quit (`-n`, `-a`, TUI attach and exited view, quit without
+  attaching), `[detached ...]` on its own line, the app's alternate screen
+  switches emulated (incl. other parameters in the same CSI, split across
+  reads, RIS), the outer mouse modes following the app, the wheel (scroll
+  mode, cursor keys on the app's alternate screen, split reports), scroll
+  mode keys, output withheld and the view anchored while scrolled, queries
+  answered while scrolled, detach while scrolled, scrolling the exited view.
+  A scripted app (`APP`) logs its input and runs `!X` commands from it.
 
 - `test_polish.py` — faint (SGR 2) restore incl. history and the app's
   pen, colors whose parameters contain a 2, attached output still

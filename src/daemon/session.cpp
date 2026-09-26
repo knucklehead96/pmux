@@ -108,15 +108,16 @@ std::unique_ptr<Session> Session::spawn(std::uint32_t id, const SessionSpec& spe
   return s;
 }
 
-Session::ReadStatus Session::read_output(std::string& out, bool attached) {
+Session::ReadStatus Session::read_output(std::vector<Screen::OutputPiece>& out, bool attached,
+                                         bool scrolled) {
   char buf[65536];
+  out.clear();
   const ssize_t n = read(master_.get(), buf, sizeof buf);
   if (n > 0) {
-    out.assign(buf, std::size_t(n));
-    screen_->feed(buf, std::size_t(n));
+    screen_->feed(buf, std::size_t(n), out);
     if (screen_->take_bell() && !attached) bell_ = true;
     const std::string replies = screen_->take_replies();
-    if (!attached && !replies.empty()) queue_input(replies);
+    if ((!attached || scrolled) && !replies.empty()) queue_input(replies);
     return ReadStatus::Data;
   }
   if (n < 0 && (errno == EAGAIN || errno == EINTR)) return ReadStatus::Again;

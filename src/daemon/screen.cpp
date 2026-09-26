@@ -306,7 +306,7 @@ void ModeTracker::reset() {
   focus_ = false;
   paste_ = false;
   mouse_ = 0;
-  mouse_1005_ = mouse_1006_ = mouse_1015_ = false;
+  mouse_1005_ = mouse_1006_ = mouse_1015_ = mouse_1016_ = false;
   cursor_shape_ = -1;
   modify_other_keys_ = 0;
   kitty_main_.assign(1, 0);
@@ -464,6 +464,7 @@ void ModeTracker::set_private_mode(int mode, bool on) {
     case 1048:
       if (!on) cursor_restore_ = true;
       break;
+    case 9:
     case 1000:
     case 1002:
     case 1003: mouse_ = on ? mode : 0; break;
@@ -471,6 +472,7 @@ void ModeTracker::set_private_mode(int mode, bool on) {
     case 1005: mouse_1005_ = on; break;
     case 1006: mouse_1006_ = on; break;
     case 1015: mouse_1015_ = on; break;
+    case 1016: mouse_1016_ = on; break;
     case 2004: paste_ = on; break;
     default: break;
   }
@@ -590,6 +592,7 @@ std::string ModeTracker::restore_input_modes() const {
   if (mouse_1005_) out += "\x1b[?1005h";
   if (mouse_1006_) out += "\x1b[?1006h";
   if (mouse_1015_) out += "\x1b[?1015h";
+  if (mouse_1016_) out += "\x1b[?1016h";
   if (focus_) out += "\x1b[?1004h";
   if (paste_) out += "\x1b[?2004h";
   if (modify_other_keys_) {
@@ -609,6 +612,24 @@ std::string ModeTracker::restore_kitty(bool alt) const {
     out += 'u';
   }
   return out;
+}
+
+std::string ModeTracker::set_kitty(bool alt) const {
+  std::string out = "\x1b[=";
+  append_int(out, long((alt ? kitty_alt_ : kitty_main_).back()));
+  out += ";1u";
+  return out;
+}
+
+ClientState ModeTracker::client_state() const {
+  ClientState st;
+  st.mouse = std::uint16_t(mouse_);
+  if (mouse_1006_) st.flags |= kStateMouseSgr;
+  if (mouse_1005_) st.flags |= kStateMouseUtf8;
+  if (mouse_1015_) st.flags |= kStateMouseUrxvt;
+  if (mouse_1016_) st.flags |= kStateMousePixels;
+  if (cursor_keys_) st.flags |= kStateCursorKeys;
+  return st;
 }
 
 std::string ModeTracker::restore_title_and_colors() const {
@@ -863,6 +884,200 @@ void SgrRewriter::feed(const char* data, std::size_t len, std::string& out) {
 }
 
 // ---------------------------------------------------------------------------
+// OutputFilter
+
+namespace {
+
+bool alt_screen_mode(long mode) {
+  return mode == 47 || mode == 1047 || mode == 1049;
+}
+
+bool mouse_mode(long mode) {
+  switch (mode) {
+    case 9:
+    case 1000:
+    case 1001:
+    case 1002:
+    case 1003:
+    case 1005:
+    case 1006:
+    case 1015:
+    case 1016: return true;
+    default: return false;
+  }
+}
+
+}  // namespace
+
+void OutputFilter::release(std::string& out) {
+  out += held_;
+  held_.clear();
+}
+
+std::string OutputFilter::take_held() {
+  if (!held_.empty()) released_ = true;
+  return std::exchange(held_, {});
+}
+
+OutputFilter::Event OutputFilter::finish_private(char final, std::string& out) {
+  if ((final != 'h' && final != 'l') || !plain_) {
+    release(out);
+    return Event::None;
+  }
+  std::string kept;
+  bool alt = false, mouse = false;
+  for (const std::string_view p : split(params_, ';')) {
+    const long mode = sgr_value(p);
+    if (alt_screen_mode(mode)) {
+      alt = true;
+    } else if (!p.empty()) {
+      mouse = mouse || mouse_mode(mode);
+      (kept += kept.empty() ? "" : ";") += p;
+    }
+  }
+  if (!alt) {
+    release(out);
+    return mouse ? Event::Mouse : Event::Mode;
+  }
+  if (released_) {
+    // Already sent unchanged: the terminal switched screens. Back to its alternate screen.
+    out += "\x1b[?1049h";
+  } else {
+    out += c0_;
+    held_.clear();
+    if (!kept.empty()) (((out += "\x1b[?") += kept) += final);
+  }
+  return Event::AltScreen;
+}
+
+std::size_t OutputFilter::feed(const char* data, std::size_t len, std::string& out, Event& event) {
+  event = Event::None;
+  // Bytes of a sequence that may still be rewritten are held, unless take_held() gave it up.
+  auto hold = [&](char ch) {
+    if (released_) out += ch;
+    else held_ += ch;
+  };
+  auto start_escape = [&] {
+    released_ = false;
+    held_.assign(1, '\x1b');
+    state_ = State::Esc;
+  };
+  for (std::size_t i = 0; i < len; ++i) {
+    const char ch = data[i];
+    const auto u = static_cast<unsigned char>(ch);
+    const bool cancel = ch == '\x18' || ch == '\x1a';
+    switch (state_) {
+      case State::Ground:
+        if (ch == '\x1b') start_escape();
+        else out += ch;
+        break;
+      case State::Esc:
+        if (ch == '\x1b') {
+          release(out);
+          start_escape();
+        } else if (ch == '[') {
+          hold(ch);
+          state_ = State::CsiStart;
+          params_.clear();
+          c0_.clear();
+          plain_ = true;
+        } else if (cancel) {
+          release(out);
+          out += ch;
+          state_ = State::Ground;
+        } else if (c0(u) || u == 0x7F) {
+          hold(ch);  // executes (DEL is ignored) without leaving the sequence
+        } else {
+          release(out);
+          out += ch;
+          state_ = State::Ground;
+          if (ch == 'c') {
+            event = Event::Reset;
+            return i + 1;
+          }
+          if (ch == ']' || ch == 'P' || ch == 'X' || ch == '^' || ch == '_') state_ = State::String;
+          else if (u >= 0x20 && u <= 0x2F) state_ = State::EscIntermediate;
+        }
+        break;
+      case State::EscIntermediate:
+        if (ch == '\x1b') {
+          start_escape();
+        } else {
+          out += ch;
+          if ((u >= 0x30 && u <= 0x7E) || cancel) state_ = State::Ground;
+        }
+        break;
+      case State::CsiStart:
+        if (ch == '?') {
+          hold(ch);
+          state_ = State::PrivateCsi;
+          break;
+        }
+        release(out);
+        state_ = State::Csi;
+        [[fallthrough]];
+      case State::Csi:
+        if (ch == '\x1b') {
+          start_escape();
+        } else {
+          out += ch;
+          if ((u >= 0x40 && u <= 0x7E) || cancel) state_ = State::Ground;
+        }
+        break;
+      case State::PrivateCsi:
+        if (ch == '\x1b') {
+          release(out);
+          start_escape();
+          break;
+        }
+        hold(ch);
+        if (cancel) {
+          release(out);
+          state_ = State::Ground;
+        } else if (u >= 0x40 && u <= 0x7E) {
+          state_ = State::Ground;
+          const Event e = finish_private(ch, out);
+          released_ = false;
+          if (e != Event::None) {
+            event = e;
+            return i + 1;
+          }
+        } else {
+          if (u >= 0x30 && u <= 0x3F) params_ += ch;
+          else if (c0(u)) c0_ += ch;
+          else plain_ = false;  // intermediates, DEL, non-ASCII
+          if (held_.size() > kMaxHeld) {
+            release(out);
+            released_ = true;
+          }
+        }
+        break;
+      case State::String:
+        if (ch == '\x1b') {
+          start_escape();
+          state_ = State::StringEsc;
+        } else {
+          out += ch;
+          if (ch == '\a' || cancel) state_ = State::Ground;
+        }
+        break;
+      case State::StringEsc:
+        if (ch == '\\') {
+          hold(ch);
+          release(out);
+          released_ = false;
+          state_ = State::Ground;
+        } else {
+          state_ = State::Esc;  // the ESC ended the string and starts a sequence
+          --i;
+        }
+        break;
+    }
+  }
+  return len;
+}
+
+// ---------------------------------------------------------------------------
 // Screen
 
 static int cb_sb_popline(int cols, VTermScreenCell* cells, void* user) {
@@ -942,7 +1157,41 @@ std::uint32_t Screen::default_bg() const {
   return pack_color(bg);
 }
 
-void Screen::feed(const char* raw, std::size_t raw_len) {
+void Screen::feed(const char* data, std::size_t len, std::vector<OutputPiece>& out) {
+  out.emplace_back();
+  ClientState state = client_state();
+  while (len > 0) {
+    OutputFilter::Event event;
+    const bool was_alt = alt_;
+    const std::size_t n = filter_.feed(data, len, out.back().bytes, event);
+    feed_model(data, n);
+    data += n;
+    len -= n;
+    switch (event) {
+      case OutputFilter::Event::None: continue;
+      case OutputFilter::Event::Mode: break;
+      case OutputFilter::Event::Mouse: out.back().reapply = true; break;
+      case OutputFilter::Event::AltScreen:
+        // The client's terminal stays on its alternate screen: show the app's new screen.
+        if (alt_ != was_alt && modes_.kitty_differs()) out.back().bytes += modes_.set_kitty(alt_);
+        out.back().bytes += repaint();
+        break;
+      case OutputFilter::Event::Reset:
+        // RIS took the terminal off its alternate screen and reset its mouse modes.
+        out.back().bytes += "\x1b[?1049h";
+        out.back().bytes += repaint();
+        out.back().reapply = true;
+        break;
+    }
+    // A new piece only where the client's STATE changes (most mode changes leave it alone).
+    const ClientState now = client_state();
+    if (now == state && !out.back().reapply) continue;
+    state = now;
+    out.emplace_back();
+  }
+}
+
+void Screen::feed_model(const char* raw, std::size_t raw_len) {
   rewritten_.clear();
   sgr_.feed(raw, raw_len, rewritten_);
   if (const auto cut = sgr_.take_boundary()) {
@@ -1065,7 +1314,10 @@ void Screen::repaint_primary(bool restore_cursor) {
 
 void Screen::push_line(Line line) {
   if (capacity_ == 0 || alt_resizing_) return;
-  while (scrollback_.size() >= capacity_) scrollback_.pop_front();
+  while (scrollback_.size() >= capacity_) {
+    scrollback_.pop_front();
+    ++dropped_;
+  }
   scrollback_.push_back(std::move(line));
 }
 
@@ -1082,68 +1334,69 @@ Screen::Line Screen::read_row(int row) const {
   return line_from_cells(cells.data(), cols_);
 }
 
-std::string Screen::snapshot(bool interactive) {
+std::string Screen::snapshot(bool interactive, bool fresh) {
   std::string out;
   out.reserve(kSnapshotReserve);
-  // Soft reset (never RIS), hide the cursor while painting, clear screen and scrollback.
-  out += "\x1b[!p\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[?7h\x1b[?25l";
-
-  // History, oldest first, as a flowing stream so it ends up in the native scrollback.
-  bool first = true;
-  auto next_line = [&] {
-    if (!first) out += "\r\n";
-    first = false;
-  };
-  for (const Line& line : scrollback_) {
-    next_line();
-    render_line(out, line);
-  }
-
-  std::vector<Line> rows;
-  rows.reserve(std::size_t(rows_));
-  for (int r = 0; r < rows_; ++r) rows.push_back(read_row(r));
-
-  if (!alt_) {
-    for (const Line& line : rows) {
-      next_line();
-      render_line(out, line);
-    }
-  } else {
-    // The primary screen is not readable while the alternate screen is active: use the copy
-    // saved when the app switched (adjusted by resizes since), so the terminal's DECSC and
-    // primary screen match.
-    for (const Line& line : saved_primary_) {
-      next_line();
-      render_line(out, truncated(line, cols_));
-    }
-    if (!saved_primary_.empty()) {
-      // The stream's last line is on row min(lines, rows_) - 1.
-      const auto saved = long(saved_primary_.size());
-      const long shown = std::min(long(scrollback_.size()) + saved, long(rows_));
-      const long row = saved_cursor_.row + shown - saved;
-      append_cup(out, int(std::clamp(row, 0L, long(rows_ - 1))), std::clamp(saved_cursor_.col, 0, cols_ - 1));
-    }
-    if (interactive) out += modes_.restore_kitty(false);  // the main screen has its own kitty flags stack
-    out += "\x1b[?1049h\x1b[H\x1b[2J";
-  }
-  // Repaint the visible rows at exact positions.
+  // Soft reset (never RIS), hide the cursor while painting, clear the screen.
+  out += "\x1b[!p\x1b[0m\x1b[H\x1b[2J\x1b[?7h\x1b[?25l";
   for (int r = 0; r < rows_; ++r) {
     append_cup(out, r, 0);
-    out += "\x1b[2K";
-    render_line(out, rows[std::size_t(r)]);
+    render_line(out, read_row(r));
   }
 
   VTermPos cursor{};
   vterm_state_get_cursorpos(state_, &cursor);
   append_cup(out, std::clamp(cursor.row, 0, rows_ - 1), std::clamp(cursor.col, 0, cols_ - 1));
   out += modes_.restore_modes(interactive);
-  if (interactive) out += modes_.restore_kitty(alt_);
+  if (interactive) out += fresh ? modes_.restore_kitty(alt_) : modes_.set_kitty(alt_);
   out += modes_.restore_title_and_colors();
 
   // The app's current pen.
   const Pen pen = current_pen();
   if (!plain(pen)) append_sgr(out, pen);
   return out;
+}
+
+std::string Screen::repaint() const {
+  std::string out = "\x1b[0m";
+  for (int r = 0; r < rows_; ++r) {
+    append_cup(out, r, 0);
+    out += "\x1b[2K";
+    render_line(out, read_row(r));
+  }
+  VTermPos cursor{};
+  vterm_state_get_cursorpos(state_, &cursor);
+  append_cup(out, std::clamp(cursor.row, 0, rows_ - 1), std::clamp(cursor.col, 0, cols_ - 1));
+  const Pen pen = current_pen();
+  if (!plain(pen)) append_sgr(out, pen);
+  return out;
+}
+
+std::string Screen::scroll_paint(std::uint64_t top) const {
+  std::string out = "\x1b[!p\x1b[0m\x1b[?25l\x1b[H\x1b[2J";
+  const std::uint64_t end = history_end();
+  for (int r = 0; r < rows_; ++r) {
+    const std::uint64_t n = top + std::uint64_t(r);
+    Line line;
+    if (n < dropped_) continue;
+    if (n < end) {
+      line = scrollback_[std::size_t(n - dropped_)];
+    } else {
+      const std::uint64_t row = n - end;
+      if (row >= std::uint64_t(rows_)) break;
+      if (!alt_) line = read_row(int(row));
+      else if (row < saved_primary_.size()) line = saved_primary_[std::size_t(row)];
+    }
+    append_cup(out, r, 0);
+    render_line(out, truncated(line, cols_));
+  }
+  return out;
+}
+
+ClientState Screen::client_state() const {
+  ClientState st = modes_.client_state();
+  if (alt_) st.flags |= kStateAltScreen;
+  return st;
 }
 
 Screen::Pen Screen::current_pen() const {

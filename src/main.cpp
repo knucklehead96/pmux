@@ -205,7 +205,7 @@ int cmd_new(const Options& o, const Config& config) {
   const std::uint32_t id = r.u32();
   const std::string name = r.str();
   if (o.detached) return 0;
-  return attach(fd.get(), id, name, config.detach_key);
+  return attach(fd.get(), id, name, config);
 }
 
 int cmd_list() {
@@ -228,7 +228,7 @@ int cmd_attach(const Options& o, const Config& config) {
     std::fprintf(stderr, "pmux: %s has exited\n", proc->name.c_str());
     return 1;
   }
-  return attach(fd.get(), proc->id, proc->name, config.detach_key);
+  return attach(fd.get(), proc->id, proc->name, config);
 }
 
 int cmd_kill(const Options& o) {

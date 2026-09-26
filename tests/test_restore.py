@@ -7,7 +7,9 @@ Two kinds of outer terminal are used:
   and tmux's mode flags.  `pmux -a NAME` runs in a fresh tmux pane per
   attach.  The oracle is a *reference pane*: the same probe script run
   directly in tmux at the same size, without pmux; after an attach the
-  pmux pane must be indistinguishable from it.
+  pmux pane must be indistinguishable from it, except that pmux shows the
+  session on the terminal's alternate screen and takes the mouse
+  (press/release, SGR) while the app tracks none (attached_state).
 * pexpect (raw bytes) where the exact bytes matter: snapshot prologue,
   modes tmux 3.4 has no format flag for (focus 1004, bracketed paste 2004,
   DECSCUSR, kitty keyboard flags, mouse encodings), OSC 4/10/11/12 color
@@ -41,6 +43,9 @@ MODE_FLAGS = ("alternate_on", "keypad_cursor_flag", "keypad_flag", "mouse_standa
               "mouse_utf8_flag", "cursor_flag", "pane_fg", "pane_bg")
 
 RIS = b"\x1bc"
+WHEEL_UP = b"\x1b[<64;10;10M"
+# Scroll mode's position indicator at the end of the top row (screen() strips the trailing blank).
+INDICATOR = re.compile(r" *\b(\d+)/(\d+)$")
 ST_OR_BEL = rb"(?:\x1b\\|\x07)"
 
 # ---------------------------------------------------------------------------
@@ -86,6 +91,29 @@ def pane_state(t, flags=MODE_FLAGS):
     cells = t.cells()
     return {"text": cells_text(cells), "cells": [norm_row(r) for r in cells],
             "cursor": t.cursor(), "flags": t.fmt(*flags)}
+
+
+def attached_state(ref):
+    """A reference pane's state as the pmux pane shows it while attached: on
+    the terminal's alternate screen, with pmux's own mouse modes if the app
+    tracks no mouse."""
+    flags = dict(ref["flags"])
+    if "alternate_on" in flags:
+        flags["alternate_on"] = "1"
+    tracking = ("mouse_standard_flag", "mouse_button_flag", "mouse_all_flag")
+    if all(flags.get(k) == "0" for k in tracking) and "mouse_any_flag" in flags:
+        flags.update(mouse_standard_flag="1", mouse_any_flag="1", mouse_sgr_flag="1",
+                     mouse_utf8_flag="0")
+    return dict(ref, flags=flags)
+
+
+def split_snapshot(snap):
+    """(client prologue, daemon snapshot, pmux mouse modes) of the bytes a
+    client writes before the app's first output after an attach."""
+    start = snap.find(b"\x1b[!p")
+    tail = b"\x1b[?1000h\x1b[?1006h"
+    end = len(snap) - len(tail) if snap.endswith(tail) else len(snap)
+    return snap[:start], snap[start:end], snap[end:]
 
 
 def describe_state_diff(expected, actual):
@@ -229,7 +257,43 @@ class RestoreCase(TuiCase):
         text = "\n".join(t.history())
         self.assertIn("[detached from %s]" % name, text, t.describe())
 
+    def scroll_history(self, t, rows):
+        """The session's history as scroll mode shows it, oldest line first
+        (pmux must have the mouse): wheel up, Home, then PageDown page by
+        page; q leaves scroll mode.  Without history the wheel does nothing."""
+        t.raw(WHEEL_UP)
+        try:
+            t.wait_for(lambda l: INDICATOR.search(l[0]), timeout=1.0)
+        except AssertionError:
+            return []
+        t.keys("Home")
+
+        def at(offset):
+            def check(lines):
+                m = INDICATOR.search(lines[0])
+                return m and m.group(1) == m.group(2) if offset is None else m and int(m.group(1)) == offset
+            return check
+        lines = t.wait_for(at(None), msg="scroll to the top")
+        total = int(INDICATOR.search(lines[0]).group(2))
+        hist = {}
+        offset = total
+        while True:
+            for r, text in enumerate(lines):
+                n = total - offset + r
+                if n < total:
+                    hist[n] = INDICATOR.sub("", text) if r == 0 else text
+            if offset <= rows:
+                break
+            offset -= rows - 1
+            t.keys("PageDown")
+            lines = t.wait_for(at(offset), msg="page down to offset %d" % offset)
+        t.keys("q")
+        t.wait_for(lambda l: not INDICATOR.search(l[0]), msg="q leaves scroll mode")
+        return [hist[n] for n in range(total)]
+
     def assertPaneMatches(self, t, expected, what, flags=MODE_FLAGS, timeout=TIMEOUT):
+        """`expected`: a reference pane's state (see attached_state)."""
+        expected = attached_state(expected)
         last = {}
 
         def check():
@@ -421,25 +485,32 @@ class ScreenRestore(RestoreCase):
 
 
 class Scrollback(RestoreCase):
-    def check_history(self, t, expected):
-        wait_until(lambda: nums(t.history(), "line") == expected,
-                   msg=lambda: "native scrollback + screen: expected %s; got %s\n%s"
-                   % (range_summary(expected), range_summary(nums(t.history(), "line")),
-                      t.describe()))
+    def test_history_not_in_native_scrollback(self):
+        self.draw("sb", numbered(b"line %04d", 1, 500))
+        for i in (1, 2):
+            t = self.attach_pane("sb")
+            lines = t.wait_for(lambda l: l[22] == "line 0500", msg="screen restored")
+            self.assertEqual(lines[:23], ["line %04d" % n for n in range(478, 501)], dump(lines))
+            self.assertEqual(lines[23], "", dump(lines))
+            self.assertEqual(t.cursor(), (0, 23))
+            self.assertEqual(nums(t.history(), "line"), list(range(478, 501)),
+                             "attach #%d: the history must not reach the native scrollback" % i)
+            self.detach_pane(t, "sb")
+            self.assertEqual(nums(t.history(), "line"), [],
+                             "attach #%d: session lines left on the main screen" % i)
 
-    def test_history_lands_in_native_scrollback(self):
+    def test_history_in_scroll_mode(self):
         self.draw("sb", numbered(b"line %04d", 1, 500))
         t = self.attach_pane("sb")
-        self.check_history(t, list(range(1, 501)))
-        lines = t.screen()
-        self.assertEqual(lines[:23], ["line %04d" % i for i in range(478, 501)], dump(lines))
-        self.assertEqual(lines[23], "", dump(lines))
-        self.assertEqual(t.cursor(), (0, 23))
-        self.assertGreaterEqual(int(t.fmt("history_size")["history_size"]), 477)
-        self.detach_pane(t, "sb")
-        # a second, fresh pane gets the same history again
-        t = self.attach_pane("sb")
-        self.check_history(t, list(range(1, 501)))
+        t.wait_for(lambda l: l[22] == "line 0500", msg="screen restored")
+        t.raw(WHEEL_UP)
+        t.wait_for(lambda l: l[0].startswith("line 0475") and l[0].endswith(" 3/477"),
+                   msg="wheel up: 3 lines back")
+        t.keys("Home")
+        t.wait_for(lambda l: l[0].startswith("line 0001") and l[0].endswith(" 477/477"),
+                   msg="Home: the oldest history line")
+        t.keys("End")
+        t.wait_for(lambda l: l[0] == "line 0478" and l[22] == "line 0500", msg="End: live screen")
         self.detach_pane(t, "sb")
 
 
@@ -450,14 +521,13 @@ class ScrollbackLimit(RestoreCase):
         self.draw("sb", numbered(b"line %04d", 1, 500))
         t = self.attach_pane("sb")
         t.wait_for(lambda l: l[22] == "line 0500", msg="screen restored")
-        state = {}
-
-        def ok():
-            ns = state["ns"] = nums(t.history(), "line")
-            # 23 screen rows (478..500) + 100 history lines -> 378..500
-            return ns and 373 <= ns[0] <= 383 and ns == list(range(ns[0], 501))
-        wait_until(ok, msg=lambda: "expected ~378..500 (100 history + 23 screen lines), got %s"
-                   % range_summary(state.get("ns")))
+        t.raw(WHEEL_UP)
+        t.keys("Home")
+        # 23 screen rows (478..500) + 100 history lines -> 378..500
+        t.wait_for(lambda l: l[0].startswith("line 0378") and l[0].endswith(" 100/100"),
+                   msg="the oldest of 100 history lines")
+        t.keys("q")
+        t.wait_for(lambda l: l[0] == "line 0478", msg="q: live screen")
         self.detach_pane(t, "sb")
 
 
@@ -471,6 +541,9 @@ class ScrollbackZero(RestoreCase):
         self.assertEqual(lines[:23], ["line %04d" % i for i in range(78, 101)], dump(lines))
         ns = nums(t.history(), "line")
         self.assertEqual(ns, list(range(78, 101)), "no history expected: %s" % range_summary(ns))
+        t.raw(WHEEL_UP)   # nothing to scroll to
+        time.sleep(0.3)
+        self.assertEqual(t.screen(), lines, "wheel without history")
         self.detach_pane(t, "sb")
 
 
@@ -517,20 +590,15 @@ class AltScreen(RestoreCase):
         self.assertPaneMatches(t, ref, "alt-screen reattach")
         self.detach_pane(t, "alt")
 
-    def test_history_flows_before_alt_screen(self):
+    def test_snapshot_paints_only_the_alt_screen(self):
         self.draw("alt", self.SCRIPT, winch=WINCH_MARK)
         c, snap, _ = self.attach_raw("alt")
         self.detach_raw(c, "alt")
-        on = snap.rfind(b"\x1b[?1049h")
-        self.assertGreater(on, 0, "snapshot never enters the alt screen:\n%s" % hexdump(snap[-512:]))
-        before, after = snap[:on], snap[on:]
-        # 40 lines on 24 rows: main 01..17 are history, 18..40 the main screen
-        seen = nums([before.decode(errors="replace")], "main")
-        for i in range(1, 18):
-            self.assertIn(i, seen, "history line 'main %02d' must flow before ?1049h; saw %r" % (i, seen))
-        self.assertIn(b"ALT-SCREEN-CONTENT", after)
-        self.assertNotIn(b"ALT-SCREEN-CONTENT", before)
-        self.assertNotIn(b"main ", after, "main-screen text painted into the alt screen")
+        prologue, body, _mouse = split_snapshot(snap)
+        self.assertEqual(prologue, b"\x1b[?1049h", "the client enters the alternate screen first")
+        self.assertNotIn(b"\x1b[?1049h", body, "the daemon's snapshot switches screens")
+        self.assertIn(b"ALT-SCREEN-CONTENT", body)
+        self.assertNotIn(b"main ", body, "the app's primary screen / history painted")
 
 
 # ===========================================================================
@@ -605,9 +673,13 @@ class Modes(RestoreCase):
                        {1003: True, 1015: True, 1049: True})
 
     def test_raw_defaults_not_enabled(self):
-        # An app that set nothing: the snapshot enables no mouse/paste/focus mode.
+        # An app that set nothing: the snapshot enables no mouse/paste/focus mode; pmux takes
+        # the mouse (press/release, SGR) after it.
         snap, _ = self.check_raw("modes4", b"", {})
-        state = private_modes(snap)
+        prologue, body, mouse = split_snapshot(snap)
+        self.assertEqual((prologue, mouse), (b"\x1b[?1049h", b"\x1b[?1000h\x1b[?1006h"),
+                         hexdump(snap[-256:]))
+        state = private_modes(body)
         for mode in (1000, 1002, 1003, 1004, 1005, 1006, 1015, 1049, 2004):
             self.assertNotEqual(state.get(mode), True, "?%d enabled for an app that never set it" % mode)
         self.assertNotEqual(state.get(25), False, "cursor hidden for an app that never hid it")
@@ -640,10 +712,13 @@ class ColorsTitle(RestoreCase):
         for bad in (rb"\x1b\]110", rb"\x1b\]112", rb"\x1b\]104" + ST_OR_BEL, rb"\x1b\]104;(?!1\b)\d"):
             self.assertIsNone(re.search(bad, out), "unexpected color reset %r in detach output:\n%s"
                               % (bad, hexdump(out)))
-        # the resets come after the mode resets
+        # the resets come after the mode resets, before the main screen returns
         first_osc = min(m.start() for m in re.finditer(rb"\x1b\](?:111|104)", out))
-        last_mode = max([m.start() for m in re.finditer(rb"\x1b\[\?[0-9;]+[hl]", out)] or [-1])
-        self.assertGreater(first_osc, last_mode, "OSC resets must follow the mode resets:\n%s" % hexdump(out))
+        last_osc = max(m.end() for m in re.finditer(rb"\x1b\](?:111|104)[^\x1b\x07]*" + ST_OR_BEL, out))
+        modes = [m.start() for m in re.finditer(rb"\x1b\[\?[0-9;]+[hl]", out)]
+        self.assertGreater(first_osc, max(modes[:-1] or [-1]), "OSC resets must follow the mode resets:\n%s"
+                           % hexdump(out))
+        self.assertEqual(out[last_osc:last_osc + 8], b"\x1b[?1049l", "then the main screen:\n%s" % hexdump(out))
 
     def test_all_color_kinds_reset(self):
         script = (b"x\x1b]10;#aabbcc\x07\x1b]11;#112233\x07\x1b]12;#00ff00\x07"
@@ -703,16 +778,18 @@ class ColorsTitle(RestoreCase):
         for i in (1, 2):
             c, snap, _ = self.attach_raw("pro")
             out = self.detach_raw(c, "pro")
-            self.assertTrue(snap.startswith(b"\x1b[!p"),
-                            "attach #%d: snapshot must start with DECSTR:\n%s" % (i, hexdump(snap[:64])))
+            self.assertTrue(snap.startswith(b"\x1b[?1049h\x1b[!p"),
+                            "attach #%d: alternate screen, then DECSTR:\n%s" % (i, hexdump(snap[:64])))
             pos = 0
-            for seq in (b"\x1b[!p", b"\x1b[0m", b"\x1b[H", b"\x1b[2J", b"\x1b[3J"):
+            for seq in (b"\x1b[!p", b"\x1b[0m", b"\x1b[H", b"\x1b[2J"):
                 idx = snap.find(seq, pos)
                 self.assertGreaterEqual(idx, 0, "attach #%d: %r missing from the prologue:\n%s"
                                         % (i, seq, hexdump(snap[:64])))
                 pos = idx + len(seq)
-            content = snap.find(b"line 01")
-            self.assertGreater(content, pos, "attach #%d: history must follow the prologue" % i)
+            self.assertNotIn(b"\x1b[3J", snap, "attach #%d: the native scrollback must not be cleared" % i)
+            self.assertGreater(snap.find(b"ALT"), pos, "attach #%d: the screen follows the prologue" % i)
+            self.assertNotIn(b"line ", snap, "attach #%d: only the visible screen is painted" % i)
+            self.assertEqual(snap.count(b"\x1b[?1049h"), 1, "attach #%d: %s" % (i, hexdump(snap[:64])))
             self.assertNoRis(snap, "snapshot #%d" % i)
             self.assertNoRis(out, "detach output #%d" % i)
 
@@ -860,21 +937,29 @@ class ResizeRestore(RestoreCase):
 
 
 class Performance(RestoreCase):
-    def test_10k_history_snapshot_time(self):
+    def test_10k_history_snapshot_and_scroll_time(self):
         total = 10050
         self.draw("big", numbered(b"hist %05d", 1, total), winch=WINCH_MARK)
         times = []
         for i in (1, 2):
             c, snap, elapsed = self.attach_raw("big")
-            self.detach_raw(c, "big")
             times.append(elapsed)
             ns = sorted(set(nums([snap.decode(errors="replace")], "hist")))
-            # 23 screen lines + 10000 history lines -> 28..10050
-            self.assertTrue(ns and 25 <= ns[0] <= 31 and ns == list(range(ns[0], total + 1)),
-                            "attach #%d: expected hist ~28..%d, got %s" % (i, total, range_summary(ns)))
-            sys.stderr.write("\n  [perf] attach #%d: %d-byte snapshot (10000 history lines) "
-                             "complete in %.1f ms\n" % (i, len(snap), elapsed * 1000))
-        self.assertLess(max(times), 1.0, "snapshot too slow: %r s" % times)
+            # only the 23 screen lines: 10028..10050
+            self.assertEqual(ns, list(range(total - 22, total + 1)),
+                             "attach #%d: expected hist %d..%d, got %s" % (i, total - 22, total, range_summary(ns)))
+            # scroll mode: the top of 10000 history lines (28..10027)
+            t0 = time.monotonic()
+            c.send(b"\x1b[<64;1;1M")
+            read_until(c, b"hist 10025")
+            c.send(b"\x1b[H")
+            read_until(c, b" 10000/10000 ")
+            scroll = time.monotonic() - t0
+            self.detach_raw(c, "big")
+            sys.stderr.write("\n  [perf] attach #%d: %d-byte snapshot in %.1f ms; scroll to the top of "
+                             "10000 history lines in %.1f ms\n" % (i, len(snap), elapsed * 1000, scroll * 1000))
+            times.append(scroll)
+        self.assertLess(max(times), 1.0, "snapshot / scroll too slow: %r s" % times)
 
 
 # ===========================================================================

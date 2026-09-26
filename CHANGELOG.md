@@ -12,6 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.sh` one-line installer:
   `curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | sh`.
 - aarch64 release binaries (`pmux-<version>-linux-aarch64` and `-static`).
+- Scroll mode: while the attached app doesn't track the mouse, the wheel scrolls
+  through the process's history (`↑` `↓` `PgUp` `PgDn` `Home` `End` too), with
+  the position shown in the top-right corner; the bottom, `Esc` or `q` leave it
+  and any other key leaves it and goes to the app. On the app's alternate
+  screen the wheel sends `↑` / `↓`. Other mouse events are ignored then.
+- The read-only view of an exited process scrolls through its history the same way.
+
+### Changed
+
+- Attach and the exited-process view use the terminal's alternate screen, like
+  tmux: after detaching or quitting, the shell's screen and native scrollback
+  are exactly as before (they used to be replaced by the process's output). The
+  process's history is no longer copied into the native scrollback.
+- The app's own alternate screen switches are emulated: quitting `less` or `vim`
+  inside pmux repaints the app's normal screen instead of leaving pmux's.
+- `[detached from NAME]` and the exit messages of `pmux -n` / `pmux -a` are
+  printed on the shell's screen, on their own line.
+
+### Fixed
+
+- The view of an exited process is sized to the terminal: a terminal taller than
+  the process's screen no longer shows lines twice.
 
 ## [0.1.0] - 2026-09-26
 

@@ -14,8 +14,10 @@ command line, e.g. in the pmux list).  Not combinable with "emit ... winch"
 or "winsize"/"signals", which install their own SIGWINCH handler.
 
 Modes:
-  inlog <path>          Append every input byte to <path> (unbuffered, one
+  inlog <path> [mouse]  Append every input byte to <path> (unbuffered, one
                         write per read).  Exit 0 after TERMINATOR is seen.
+                        With 'mouse', first enable mouse tracking (?1000h
+                        ?1006h), so pmux passes mouse reports through.
   emit <corpus> [winch] On each input read containing START_BYTE (and, with
                         the optional 'winch' flag, on each SIGWINCH) write
                         START_MARKER + corpus + END_MARKER to stdout.  Keeps
@@ -136,7 +138,9 @@ def main(argv):
 
     wakeup_r = None
     if mode == "inlog":
-        (log_path,) = args
+        log_path = args[0]
+        if "mouse" in args[1:]:
+            write_all(1, b"\x1b[?1000h\x1b[?1006h")
     elif mode == "emit":
         corpus_path = args[0]
         on_winch = "winch" in args[1:]
