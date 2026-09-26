@@ -1,4 +1,4 @@
-"""CLI contract: daemon auto-spawn, -n / -l / -k / -a exit codes, list format."""
+"""CLI behaviour: daemon auto-spawn, -n / -l / -k / -a exit codes, list format."""
 import os
 import shutil
 import stat

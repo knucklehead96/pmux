@@ -1,4 +1,4 @@
-"""Regression tests for daemon / screen bugs found in review.
+"""Regression tests for daemon / screen bugs.
 
 - libvterm reflow crash: a wrapped line longer than the screen, then an
   attach at a different size (reflow is disabled).

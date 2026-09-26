@@ -1,8 +1,9 @@
 # pmux tests
 
-Black-box tests for Milestone 1 (daemon, `-n`/`-l`/`-k`/`-a`, attach
-passthrough), Milestone 2 (list TUI, config file), Milestone 3 (libvterm
-screen / scrollback / mode restore) and Milestone 4 (polish).
+Black-box tests for the daemon and CLI (`-n`/`-l`/`-k`/`-a`, attach
+passthrough), the list TUI and config file, libvterm screen / scrollback /
+mode restore, and the finer details (faint text, self-attach, small
+terminals, release build).
 
     tests/run.sh                          # all tests, from anywhere
     tests/run.sh -k Detach                # unittest name filter
@@ -36,8 +37,8 @@ Files:
   `--winch-mark NAME` prints `[winch:NAME]` on every SIGWINCH, i.e. on
   every attach, which is how TUI tests see that an attach happened.
   `draw <script> [winch=F] [wlog=P] [usr1=F] [inlog=P] [exit=N]` writes a
-  script once and never reacts to input (M3 tests: everything on screen
-  after an attach comes from pmux's snapshot).
+  script once and never reacts to input (restore tests: everything on
+  screen after an attach comes from pmux's snapshot).
 - `tui.py` — `TmuxTui`: runs `pmux` in a private tmux server
   (`tmux -L <unique> -f /dev/null`, `TMUX_TMPDIR` in the test's temp dir,
   100x30, `tmux-256color`, `COLORTERM=truecolor`) with `keys()` (`C-Left`
@@ -50,10 +51,10 @@ Files:
   constants (`FOOTER_LIST`, `FOOTER_FILTER`, `FOOTER_EMPTY`, `FOOTER_QUIT`,
   `footer_kill()`) and the hint lists they are built from.  TUI tests write
   `~/.pmux/config` with `theme = dark` unless they test themes.
-- `test_cli.py`, `test_attach.py` — M1 (`-l` states running | exited:N |
+- `test_cli.py`, `test_attach.py` — CLI and attach (`-l` states running | exited:N |
   signaled:N; `-k` kills and removes, SIGKILL after 3 s; default detach key
   Ctrl+Left, Ctrl+\\ reaches the app).
-- `test_tui.py` — M2 list screen: layout, colors/themes, spelled-out key
+- `test_tui.py` — list screen: layout, colors/themes, spelled-out key
   hints (whole hints dropped from the right when narrow, `type to filter`
   above 8 processes), keys, attach and detach (Ctrl+Left) from the list,
   new/rename dialogs, kill (Ctrl+X twice: kill + remove, or remove an exited
@@ -61,9 +62,9 @@ Files:
   refresh (bell/exit; no idle state), quit (Ctrl+C twice; other key / 2 s
   timeout cancels; Ctrl+Q does nothing) and terminal restore, passthrough
   through the TUI (pexpect). `HarnessSelfTest` validates `tui.py` without pmux.
-- `test_config.py` — M2 config: warnings (incl. `detach_key`),
+- `test_config.py` — config file: warnings (incl. `detach_key`),
   `default_cmd`, `default_dir`.
-- `test_restore.py` — M3: screen/attribute/cursor restore (CLI and TUI),
+- `test_restore.py` — restore: screen/attribute/cursor restore (CLI and TUI),
   output while detached, native scrollback and `scrollback_lines`
   (incl. 0 and invalid values), alt screen, modes, OSC 4/10/11/12 replay and
   reset, title, snapshot prologue / no RIS, query replies (detached:
@@ -75,13 +76,13 @@ Files:
   prints on SIGWINCH (pmux signals the app on attach, after the snapshot).
   `RestoreHarnessSelfTest` validates the probe and oracle without pmux.
 
-- `test_polish.py` — M4: faint (SGR 2) restore incl. history and the app's
+- `test_polish.py` — faint (SGR 2) restore incl. history and the app's
   pen, colors whose parameters contain a 2, attached output still
   byte-exact (plus >16-argument CSIs that crash libvterm 0.3.3), keys typed
   during the startup theme query, self-attach refusal (CLI, TUI) and nested
   attach to another process, the too-small terminal screen, and (slow)
   Release build + install into a temp dir.
-- `test_regressions_client.py` — client / TUI review fixes: detach while
+- `test_regressions_client.py` — client / TUI regressions: detach while
   output floods a slow terminal, TUI exit when the daemon dies, socket
   directory / owner checks, resizes during a TUI attach, inherited fds,
   signals while attached (CLI, TUI), detach-key forms for every
@@ -91,7 +92,7 @@ Files:
   Ctrl+Left; the TUI honours the setting), Home/End
   variants, the list screen's late cursor-shape reply, harness style
   carry-over, specific connect errors.
-- `test_regressions_daemon.py` — daemon / screen review fixes: libvterm
+- `test_regressions_daemon.py` — daemon / screen regressions: libvterm
   crashes (reflow, wide characters on one column, huge sizes), the alternate
   screen across resizes, RIS in the alternate screen, child signal state and
   umask, attach loops, modifyOtherKeys restore, process name, `daemon.log`,

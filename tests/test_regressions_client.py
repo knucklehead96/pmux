@@ -1,4 +1,4 @@
-"""Regression tests for client / TUI review findings: detach under an output
+"""Regression tests for client / TUI bugs: detach under an output
 flood, SIGPIPE, socket directory and peer checks, SIGWINCH in helper threads,
 inherited fds, signals while attached, detach key forms, detach resets,
 Home/End variants, terminal replies leaking into the app, the capture-pane
@@ -19,7 +19,7 @@ from helpers import (CTRL_BACKSLASH, CTRL_LEFT, CTRL_SHIFT_LEFT, DETACH, PMUX_BI
                      PmuxTestCase, expect_exit, read_file, read_until, wait_until)
 from tui import FOOTER_LIST, TmuxTui, TuiCase, parse_ansi_line, winch_marker
 
-# The exact reset sequence written on detach (SPEC "Attached" / "On detach").
+# The exact reset sequence written on detach.
 MODE_RESETS = (b"\x1b[<99u"
                b"\x1b[?1049l"
                b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l"

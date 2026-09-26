@@ -1,4 +1,4 @@
-"""Milestone 2: the list TUI (layout, colors, keys, dialogs, filter, mouse,
+"""The list TUI (layout, colors, keys, dialogs, filter, mouse,
 refresh, attach from the list, quit / terminal restore).
 
 Most tests drive `pmux` inside a private tmux server (tests/tui.py) and read
@@ -922,36 +922,36 @@ class Refresh(TuiCase):
 
 class Mouse(TuiCase):
     def populate(self):
-        for n in ("m1", "m2", "m3"):
+        for n in ("mouse1", "mouse2", "mouse3"):
             self.marker(n)
-        t = self.start_list("m1", "m2", "m3")
-        self.wait_selected(t, "m1")
+        t = self.start_list("mouse1", "mouse2", "mouse3")
+        self.wait_selected(t, "mouse1")
         return t
 
     def test_click_selects(self):
         t = self.populate()
         lines = t.screen()
-        t.click(10, row_index(lines, "m3"))
-        self.wait_selected(t, "m3")
-        t.click(10, row_index(lines, "m2"))
-        self.wait_selected(t, "m2")
+        t.click(10, row_index(lines, "mouse3"))
+        self.wait_selected(t, "mouse3")
+        t.click(10, row_index(lines, "mouse2"))
+        self.wait_selected(t, "mouse2")
         self.assertTrue(t.screen()[0].startswith(" ✻ pmux"), "single click must not attach")
 
     def test_double_click_attaches(self):
         t = self.populate()
-        t.double_click(10, row_index(t.screen(), "m2"))
-        self.wait_attached(t, "m2")
-        self.detach_to_list(t, "m1", "m2", "m3")
-        self.wait_selected(t, "m2")
+        t.double_click(10, row_index(t.screen(), "mouse2"))
+        self.wait_attached(t, "mouse2")
+        self.detach_to_list(t, "mouse1", "mouse2", "mouse3")
+        self.wait_selected(t, "mouse2")
 
     def test_wheel_moves_selection(self):
         t = self.populate()
         t.wheel(10, 5, down=True)
-        self.wait_selected(t, "m2")
+        self.wait_selected(t, "mouse2")
         t.wheel(10, 5, down=True)
-        self.wait_selected(t, "m3")
+        self.wait_selected(t, "mouse3")
         t.wheel(10, 5, down=False)
-        self.wait_selected(t, "m2")
+        self.wait_selected(t, "mouse2")
 
 
 # ===========================================================================

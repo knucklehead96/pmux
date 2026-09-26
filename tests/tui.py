@@ -1,4 +1,4 @@
-"""tmux-driven harness for the pmux list TUI (Milestone 2).
+"""tmux-driven harness for the pmux list TUI.
 
 TmuxTui runs a command (by default `pmux` with no arguments, i.e. the list
 TUI) in a detached session of a private tmux server:

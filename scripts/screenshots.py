@@ -15,6 +15,7 @@ kill-confirm.png.  Requires tmux, perl (the demo processes use it to set a
 plausible command line) and a headless Chromium.  Standard library only.
 """
 import argparse
+import glob
 import html
 import os
 import re
@@ -26,9 +27,10 @@ import tempfile
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_CHROME = os.path.expanduser(
-    "~/.cache/ms-playwright/chromium_headless_shell-1234/"
-    "chrome-headless-shell-linux64/chrome-headless-shell")
+CHROME_NAMES = ("chrome-headless-shell", "chromium", "chromium-browser",
+                "google-chrome", "google-chrome-stable")
+PLAYWRIGHT_GLOBS = ("~/.cache/ms-playwright/*/chrome-headless-shell-linux64/chrome-headless-shell",
+                    "~/.cache/ms-playwright/*/chrome-linux64/chrome")
 
 ROWS, COLS = 24, 100
 FOOTER_LIST = "enter attach"
@@ -448,16 +450,37 @@ def shoot(chrome, html_text, png, scale, workdir):
         raise RuntimeError("chrome failed: %s" % p.stderr.decode(errors="replace"))
 
 
+def find_chrome(explicit):
+    """--chrome, then $CHROME, then well-known names on PATH, then a
+    Playwright-installed Chromium; None if nothing is found."""
+    for cand in (explicit, os.environ.get("CHROME")):
+        if cand:
+            return shutil.which(cand) or cand
+    for name in CHROME_NAMES:
+        path = shutil.which(name)
+        if path:
+            return path
+    for pattern in PLAYWRIGHT_GLOBS:
+        hits = sorted(p for p in glob.glob(os.path.expanduser(pattern)) if os.access(p, os.X_OK))
+        if hits:
+            return hits[-1]
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--pmux", default=os.path.join(REPO, "build", "pmux"))
     ap.add_argument("--out", default=os.path.join(REPO, "docs", "screenshots"))
-    ap.add_argument("--chrome", default=os.environ.get("CHROME", DEFAULT_CHROME))
+    ap.add_argument("--chrome", help="headless Chromium binary (default: $CHROME, PATH, Playwright cache)")
     ap.add_argument("--scale", type=float, default=2, help="device scale factor (default 2)")
     ap.add_argument("--keep-html", action="store_true", help="also write the .html pages to --out")
     a = ap.parse_args()
 
     pmux = os.path.abspath(a.pmux)
+    a.chrome = find_chrome(a.chrome)
+    if not a.chrome:
+        sys.exit("screenshots.py: no headless Chromium found; pass --chrome PATH or set $CHROME "
+                 "(looked for %s on PATH and in ~/.cache/ms-playwright)" % ", ".join(CHROME_NAMES))
     for exe, what in ((pmux, "--pmux"), (a.chrome, "--chrome / $CHROME")):
         if not os.access(exe, os.X_OK):
             sys.exit("screenshots.py: %s is not executable (%s)" % (exe, what))

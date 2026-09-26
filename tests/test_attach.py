@@ -1,4 +1,4 @@
-"""Attach contract: byte-exact passthrough, detach keys, resize, env, exits."""
+"""Attach behaviour: byte-exact passthrough, detach keys, resize, env, exits."""
 import os
 import random
 import time
@@ -116,7 +116,7 @@ class DetachKeys(AttachCase):
         seen = self.sync(c, log, b"", b"pre")
         c.send(CTRL_LEFT[:3])         # ESC [ 1
         # Unavoidable tiny sleep: force two separate reads by the client,
-        # well inside the contract's 20 ms hold-back window.
+        # well inside the client's 20 ms hold-back window.
         time.sleep(0.002)
         c.send(CTRL_LEFT[3:])         # ; 5 D
         status, sig, out = expect_exit(c, b"[detached from app]")

@@ -1,4 +1,4 @@
-"""Milestone 3: libvterm screen / scrollback / mode restore.
+"""libvterm screen / scrollback / mode restore.
 
 Two kinds of outer terminal are used:
 
@@ -555,8 +555,7 @@ class Modes(RestoreCase):
         # cursor of a dead pane, so cursor_flag is always 0 here)
 
     def test_detach_resets_cursor_key_and_keypad_modes(self):
-        # The task contract says "after detach all flags are off"; SPEC's
-        # detach list does not name DECCKM / DECKPAM explicitly.
+        # After detach every mode flag is off, including DECCKM / DECKPAM.
         self.draw("md", MODE_SCRIPT)
         t = self.attach_pane("md")
         wait_until(lambda: t.fmt("keypad_flag")["keypad_flag"] == "1", msg="keypad restored")
@@ -589,7 +588,7 @@ class Modes(RestoreCase):
 
     def test_raw_mode_restore_set1(self):
         snap, out = self.check_raw(
-            "m1", MODE_SCRIPT, {1: True, 1002: True, 1006: True, 1004: True, 2004: True, 25: False},
+            "modes1", MODE_SCRIPT, {1: True, 1002: True, 1006: True, 1004: True, 2004: True, 25: False},
             extra=(rb"\x1b\[5 q", rb"\x1b=", rb"\x1b\[(?:>1|=1(?:;1)?)u"))
         # keypad: the last keypad sequence must be DECKPAM
         self.assertGreater(snap.rfind(b"\x1b="), snap.rfind(b"\x1b>"), "keypad left in normal mode")
@@ -598,16 +597,16 @@ class Modes(RestoreCase):
         self.assertBytesIn(rb"\x1b\[\?25h", out, "detach shows the cursor")
 
     def test_raw_mode_restore_set2(self):
-        self.check_raw("m2", b"\x1b[?1000h\x1b[?1005h\x1b[2 q",
+        self.check_raw("modes2", b"\x1b[?1000h\x1b[?1005h\x1b[2 q",
                        {1000: True, 1005: True}, extra=(rb"\x1b\[2 q",))
 
     def test_raw_mode_restore_set3(self):
-        self.check_raw("m3", b"\x1b[?1003h\x1b[?1015h\x1b[?1049h\x1b[Halt",
+        self.check_raw("modes3", b"\x1b[?1003h\x1b[?1015h\x1b[?1049h\x1b[Halt",
                        {1003: True, 1015: True, 1049: True})
 
     def test_raw_defaults_not_enabled(self):
         # An app that set nothing: the snapshot enables no mouse/paste/focus mode.
-        snap, _ = self.check_raw("m4", b"", {})
+        snap, _ = self.check_raw("modes4", b"", {})
         state = private_modes(snap)
         for mode in (1000, 1002, 1003, 1004, 1005, 1006, 1015, 1049, 2004):
             self.assertNotEqual(state.get(mode), True, "?%d enabled for an app that never set it" % mode)

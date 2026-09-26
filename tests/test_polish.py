@@ -1,4 +1,4 @@
-"""Milestone 4 (polish): faint restore, keys typed during the startup theme
+"""Polish: faint restore, keys typed during the startup theme
 query, self-attach refusal, too-small terminal, Release build + install."""
 import os
 import re

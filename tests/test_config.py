@@ -1,4 +1,4 @@
-"""Milestone 2: ~/.pmux/config parsing (warnings, default_cmd, default_dir)."""
+"""~/.pmux/config parsing (warnings, default_cmd, default_dir)."""
 import os
 import re
 import unittest
@@ -6,7 +6,7 @@ import unittest
 from helpers import PmuxTestCase
 from tui import TuiCase, dialog_complete, dump
 
-SPEC_EXAMPLE = """\
+README_EXAMPLE = """\
 # ~/.pmux/config
 default_dir = ~/work      # used when the list is empty
 default_cmd = $SHELL      # command for new processes
@@ -28,7 +28,7 @@ class Warnings(PmuxTestCase):
         self.assertEqual((p.returncode, p.stderr), (0, b""))
 
     def test_spec_example_is_valid(self):
-        self.assertEqual(self.list_with(SPEC_EXAMPLE), "")
+        self.assertEqual(self.list_with(README_EXAMPLE), "")
 
     def test_comments_blank_lines_and_spacing(self):
         text = "\n# comment\n   # indented comment\n  theme   =   light  # trailing\naccent=blue\n\n"
@@ -55,7 +55,7 @@ class Warnings(PmuxTestCase):
         self.assertRegex(err, r"pmux: ~/\.pmux/config:2: .*invalid value for theme")
 
     def test_invalid_accent(self):
-        # Same message shape as the theme case (inferred from the contract).
+        # Same message shape as the theme case.
         err = self.list_with("accent = pink\n")
         self.assertRegex(err, r"pmux: ~/\.pmux/config:1: .*invalid value for accent")
 
