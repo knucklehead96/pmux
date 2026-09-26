@@ -1,76 +1,99 @@
 # pmux
 
-A terminal process multiplexer: keep long-running processes alive in the background, see them all in one list, and attach to any of them full-screen.
+A terminal process multiplexer. It keeps long-running processes alive in the background, lists them all in one place and lets you attach to any of them full-screen, byte for byte.
+
+[![CI](https://github.com/knucklehead96/pmux/actions/workflows/ci.yml/badge.svg)](https://github.com/knucklehead96/pmux/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/knucklehead96/pmux)](https://github.com/knucklehead96/pmux/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ![pmux process list](docs/screenshots/list-dark.png)
 
 ## Features
 
-- **One list, grouped by directory.** A list in the style of Claude Code shows every process under the directory it was started in.
-- **Status at a glance.** Each process shows whether it is running, has rung the bell while you were away, or has exited (with the exit code or signal). Each row also shows the command currently in the foreground and the process's age.
-- **Byte-exact attach.** Attaching gives the process the whole terminal, with no status bar and no border. Everything you type goes straight to it except one key: the detach key (`Ctrl+←` by default, configurable), which takes you back to the list.
-- **Screen and scrollback restore.** The daemon keeps a libvterm screen for every process. When you reattach, it restores the screen, the scrollback (into your terminal's native scrollback), the cursor and the terminal modes, even for full-screen apps on the alternate screen.
-- **Automatic dark/light theme.** pmux asks the terminal for its background color and picks a matching palette. Four accent colors are available.
-- **Plain config file.** Settings live in `~/.pmux/config`, and the file is optional.
-
-Processes keep running after you quit the TUI or close the terminal.
+- **One list, grouped by directory.** A Claude Code-style list shows every process under the directory where it was started, along with its current foreground command and its age.
+- **Status at a glance.** `●` means running, `!` means it rang the bell while you were away, and `○` means it exited (with the exit code or signal).
+- **Byte-exact attach.** When you attach, the process gets the whole terminal: no status bar and no border. Every byte you type goes straight to it, except for one detach key (`Ctrl+←` by default).
+- **Screen and scrollback restore.** The daemon keeps a libvterm screen for every process. On reattach, pmux restores the screen, the scrollback (into your terminal's native scrollback), the cursor and the terminal modes. This works for full-screen apps on the alternate screen too.
+- **Processes outlive the UI.** Processes keep running after you quit the list or close the terminal.
+- **Automatic dark/light theme.** pmux reads the terminal's background color and picks a matching palette. There are four accent colors and a 16-color `ansi` theme.
+- **One small binary.** The same executable is both the daemon and the client, and the config file is optional.
 
 ## Install
 
-Requirements: Linux, a C++20 compiler, CMake ≥ 3.20, pkg-config and libvterm (`libvterm-dev` on Debian/Ubuntu). [FTXUI](https://github.com/ArthurSonzogni/FTXUI) is downloaded and built automatically.
+### Prebuilt binaries
 
-```sh
-cmake -S . -B build && cmake --build build -j
-cmake --install build --prefix ~/.local      # installs ~/.local/bin/pmux
-```
-
-## Release binaries
-
-```sh
-scripts/release.sh
-```
-
-builds two Release variants (in `build-release-dynamic/` and `build-release-static/`) and writes to `dist/`:
+Every [release](https://github.com/knucklehead96/pmux/releases) ships two x86-64 Linux binaries:
 
 | File | |
 |---|---|
-| `pmux-<version>-linux-<arch>` | Dynamically linked (libvterm, libstdc++, glibc), stripped. |
-| `pmux-<version>-linux-<arch>-static` | Fully static (libvterm, libstdc++ and glibc linked in), stripped. Runs on any x86-64 Linux with no libraries installed. |
+| `pmux-<version>-linux-x86_64-static` | Fully static. Runs on any x86-64 Linux with no libraries installed. |
+| `pmux-<version>-linux-x86_64` | Dynamically linked. Needs `libvterm0` and a glibc / libstdc++ at least as new as Ubuntu 24.04's. |
 | `SHA256SUMS` | Checksums of both. |
 
-The version comes from `project()` in CMakeLists.txt; `pmux --version` prints it. The script uses two CMake options, also usable on their own: `-DPMUX_STATIC=ON` (static link; needs `libvterm.a`, shipped by `libvterm-dev`) and `-DPMUX_STRIP=ON` (strip at link time with `-s`). pmux does not use NSS lookups (users, hosts), so the static glibc build has no NSS caveats.
+```sh
+mkdir -p ~/.local/bin
+curl -Lo ~/.local/bin/pmux https://github.com/knucklehead96/pmux/releases/download/v0.1.0/pmux-0.1.0-linux-x86_64-static && chmod +x ~/.local/bin/pmux
+```
+
+To check the download against `SHA256SUMS` before installing:
+
+```sh
+url=https://github.com/knucklehead96/pmux/releases/download/v0.1.0
+curl -LO "$url/pmux-0.1.0-linux-x86_64-static" -LO "$url/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS
+install -m 755 pmux-0.1.0-linux-x86_64-static ~/.local/bin/pmux
+```
+
+### Build from source
+
+You need Linux, a C++20 compiler, CMake ≥ 3.20, pkg-config and libvterm. The build downloads and compiles [FTXUI](https://github.com/ArthurSonzogni/FTXUI) automatically.
+
+```sh
+sudo apt install cmake g++ pkg-config libvterm-dev    # Debian / Ubuntu
+cmake -S . -B build && cmake --build build -j
+cmake --install build --prefix ~/.local                # installs ~/.local/bin/pmux
+```
+
+The default build type is `Release`. To build the release binaries yourself, run `scripts/release.sh`. It writes the stripped dynamic and static binaries and `SHA256SUMS` to `dist/`. The two CMake options it uses also work on their own: `-DPMUX_STATIC=ON` (needs `libvterm.a`, which `libvterm-dev` ships) and `-DPMUX_STRIP=ON`.
 
 ## Usage
 
 | Command | |
 |---|---|
-| `pmux` | Open the process list. Starts the daemon if it isn't running. |
-| `pmux -n [name] [-d] [-- cmd …]` | Create a process in the current directory and attach to it. `-d` leaves it detached. The name defaults to the directory's basename (`-2`, `-3`, … added if that name is taken). The command defaults to `default_cmd`, then `$SHELL`. |
-| `pmux -l` | Print the processes as tab-separated `NAME STATE PID DIR COMMAND` lines. |
-| `pmux -a <name>` | Attach to a process. |
-| `pmux -k <name>` | Kill a process (`SIGHUP`, then `SIGKILL` after 3 s) and remove it from the list once it has exited. A process that has already exited is just removed. |
-| `pmux --stop [-f]` | Stop the daemon. Refuses (exit 1, listing them) while processes are running; `-f` / `--force` kills them first (`SIGHUP`, then `SIGKILL` after 3 s). |
-| `pmux --daemon` | Run the daemon in the foreground, for debugging. |
-| `pmux -V` / `--version` | Print the version. |
+| `pmux` | Opens the process list. Starts the daemon if it isn't running. |
+| `pmux -n [name] [-d] [-- cmd …]` | Creates a process in the current directory and attaches to it. `-d` leaves it detached. The name defaults to the directory's basename, with `-2`, `-3`, … added if that name is taken. The command defaults to `default_cmd`, then `$SHELL`. |
+| `pmux -l` | Prints the processes as tab-separated `NAME STATE PID DIR COMMAND` lines. `STATE` is `running`, `exited:<code>` or `signaled:<signo>`. |
+| `pmux -a <name>` | Attaches to a process. |
+| `pmux -k <name>` | Kills a process (`SIGHUP`, then `SIGKILL` after 3 s) and removes it from the list. A process that has already exited is just removed. |
+| `pmux --stop [-f \| --force]` | Stops the daemon. If processes are still running, it lists them and exits with status 1. `--force` kills them first. |
+| `pmux --daemon` | Runs the daemon in the foreground, for debugging. |
+| `pmux -V`, `pmux --version` | Prints the version. |
+| `pmux -h`, `pmux --help` | Prints usage. |
 
-### Keys in the list
+## Keys
+
+### In the list
 
 | Key | Action |
 |---|---|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Select a process |
-| `Enter`, double-click | Attach. On an exited process, show its final screen and history read-only. |
+| `Enter`, double-click | Attach. On an exited process, this shows its final screen and history read-only. |
 | `Ctrl+N` | New process: a dialog with Name, Dir and Command fields |
 | `Ctrl+R` | Rename the selected process |
-| `Ctrl+X` twice | Kill the selected process and remove it from the list. On an exited process, remove it. The first press asks `press ctrl+x again to kill <name>`; another key or 2 s cancels. |
+| `Ctrl+X` twice | Kill the selected process and remove it. On an exited process, this just removes it. Any other key, or waiting 2 s, cancels. |
 | typing | Filter by name, directory or command. `Backspace` edits the filter and `Esc` clears it. |
 | mouse wheel, click | Move or set the selection |
-| `Ctrl+C` twice | Quit the list. The daemon and all processes keep running. The first press asks `press ctrl+c again to quit`; another key or 2 s cancels. |
+| `Ctrl+C` twice | Quit the list. The daemon and your processes keep running. |
 
-**Attached:** `Ctrl+←` returns to the list (set `detach_key` to use `Ctrl+Shift+←` or `Ctrl+\` instead). pmux intercepts nothing else. Every other key, mouse event, paste and focus event goes to the process unchanged. With the default, `Ctrl+\` reaches the process, but `Ctrl+←` (word-left in shells and editors) does not. Mouse-wheel scrolling uses your terminal's own scrollback.
+### While attached
 
-## Config
+pmux intercepts only the detach key, which is `Ctrl+←` by default. Every other key, mouse event, paste and focus event goes to the process unchanged. Mouse-wheel scrolling uses your terminal's own scrollback.
 
-`~/.pmux/config` is optional. Each line is `key = value`, and `#` starts a comment. A leading `~` and `$VAR` / `${VAR}` in values are expanded. pmux prints a warning for unknown keys and invalid values, then ignores them.
+Because pmux intercepts the detach key, the attached app never receives it. Shells and editors use `Ctrl+←` to move one word left, so if you need that, set `detach_key` to `ctrl+shift+left` or `ctrl+backslash`. On the Linux virtual console (no X or Wayland), `Ctrl+←` sends the same bytes as `←`, so use `detach_key = ctrl+backslash` there.
+
+## Configuration
+
+The config file `~/.pmux/config` is optional. Each line is `key = value`, and `#` starts a comment. pmux expands a leading `~` and `$VAR` / `${VAR}` in values. For unknown keys and invalid values, it prints a warning and ignores the line.
 
 ```ini
 default_dir = ~/work      # used when the list is empty
@@ -81,40 +104,52 @@ scrollback_lines = 10000  # history lines kept per process, 0–100000
 detach_key  = ctrl+left   # ctrl+left | ctrl+shift+left | ctrl+backslash
 ```
 
-- `default_dir`: the directory pre-filled in the New process dialog when the list is empty. If it isn't set, pmux uses the directory it was launched from. Otherwise the dialog uses the selected process's directory.
-- `default_cmd`: the command for new processes. Simple `'…'` / `"…"` quoting is supported. If it isn't set, pmux uses `$SHELL`, then `/bin/sh`.
-- `theme`: `auto` asks the terminal for its background color at startup. `dark` and `light` force a palette. `ansi` uses only the terminal's 16 palette colors.
-- `accent`: the color of the logo, the dialog titles, the cursor and the filter prompt.
-- `scrollback_lines`: the number of history lines the daemon keeps for each process (0–100000). The setting applies to processes created after the change.
-- `detach_key`: the one key pmux intercepts while attached, for `pmux -a`, `pmux -n` and the list. `ctrl+left` (the default) also matches the kitty keyboard protocol and rxvt encodings of `Ctrl+←`; `ctrl+backslash` is the classic `Ctrl+\`.
+| Key | Meaning |
+|---|---|
+| `default_dir` | The directory filled in by the New process dialog when the list is empty. If it isn't set, pmux uses the directory it was launched from. When a process is selected, the dialog uses that process's directory instead. |
+| `default_cmd` | The command for new processes, with simple `'…'` / `"…"` quoting. If it isn't set, pmux uses `$SHELL`, then `/bin/sh`. |
+| `theme` | `auto` asks the terminal for its background color at startup. `dark` and `light` force a palette. `ansi` uses only the terminal's 16 colors. |
+| `accent` | The color of the logo, dialog titles, cursor and filter prompt. |
+| `scrollback_lines` | The number of history lines kept for each process. It applies to processes created after the change. |
+| `detach_key` | The one key pmux intercepts while attached. `ctrl+left` also matches the kitty keyboard protocol and rxvt encodings of `Ctrl+←`. |
+
+The daemon logs startup and fatal errors to `~/.pmux/daemon.log`.
 
 ## How it works
 
-- `pmux` is a single binary with two roles: a client (the list TUI and the CLI commands) and a daemon. The first command you run starts the daemon (fork + `setsid`), which runs a single-threaded `epoll` loop.
-- The daemon owns a PTY for each process (`forkpty`). Clients talk to it over a Unix socket at `$XDG_RUNTIME_DIR/pmux/pmux.sock` (fallback `/tmp/pmux-$UID/pmux.sock`, directory mode `0700`).
-- All of a process's output goes into its own libvterm screen with a scrollback ring buffer, whether a client is attached or not. A small parser also tracks terminal modes that libvterm doesn't expose: mouse, bracketed paste, application keys, kitty keyboard flags, the title and color changes.
-- On attach, the daemon resizes that screen to your terminal and sends a snapshot: the history, the screen, the cursor and the modes. After that it forwards the PTY output unchanged. Detaching undoes the modes and color changes the app made, so the list always comes back clean.
+`pmux` is a single binary with two roles. The first command you run starts the daemon (fork + `setsid`), which runs a single-threaded `epoll` loop. The daemon owns a PTY for each process. Clients (the list and the CLI) talk to it over a Unix socket that only you can access: `$XDG_RUNTIME_DIR/pmux/pmux.sock`, or `/tmp/pmux-$UID/pmux.sock`, in a `0700` directory with a peer-uid check.
+
+All of a process's output goes into its own libvterm screen with a scrollback ring buffer, whether a client is attached or not. A small parser also tracks the state libvterm doesn't expose: mouse and paste modes, application keys, kitty keyboard flags, the title and color changes. When you attach, the daemon resizes that screen to your terminal and sends a snapshot of the history, screen, cursor and modes. After that, it forwards the PTY output unchanged.
+
+The attached app behaves as if it were running directly in your terminal:
+
+- **Output is byte-for-byte.** Between the restore on attach and the detach, pmux writes nothing of its own. It never sends a full reset (RIS).
+- **Input is byte-for-byte.** Everything except the detach key reaches the app, and the app gets the full terminal size.
+- **Your real terminal answers queries.** The app's queries (DA, DSR, OSC 11, kitty keyboard, XTVERSION) are answered by your terminal. While the process is detached, libvterm answers the basic ones so apps don't hang.
+- **Detaching is invisible to the app.** The PTY stays open and the app gets no `SIGHUP`. pmux adds no environment variables or wrapper processes, and the app keeps your real `TERM` and `COLORTERM`. On detach, pmux undoes the app's modes and color changes, so the list always comes back clean.
 
 ## Limitations
 
-- Linux only.
-- One attached client per process. A new attach detaches the previous client.
-- Some terminal state isn't restored on reattach: OSC 8 hyperlinks, scroll margins, character sets, and attributes libvterm doesn't store (such as faint text and alternate fonts).
-- The attached process never receives the detach key. With the default that is `Ctrl+←`, which shells and editors use for word-left; pick another `detach_key` if you need it.
-- On the Linux virtual console (no X/Wayland), `Ctrl+←` sends the same bytes as `←`. Set `detach_key = ctrl+backslash` there.
+- pmux runs on Linux only.
+- Only one client can attach to a process at a time. A new attach detaches the previous client.
+- Some terminal state isn't restored on reattach: OSC 8 hyperlinks, underline color, scroll margins, character sets, and alternate fonts.
+- Long lines are not reflowed when the terminal size changes between attaches.
+- The attached app never receives the detach key (see [While attached](#while-attached)).
 - A process keeps the `TERM` of the terminal that created it, even if you attach from a different terminal type. tmux and screen behave the same way.
 
-## Testing
+## Development
 
 ```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j
 tests/run.sh                  # the whole suite
 tests/run.sh -k test_tui      # a single module or test name
-PMUX_FAST=1 tests/run.sh      # skip the slow (>5 s silence) tests
+PMUX_FAST=1 tests/run.sh      # skip the slow tests
+PMUX_BIN=dist/pmux-0.1.0-linux-x86_64-static PMUX_FAST=1 tests/run.sh
 ```
 
-The tests need python3, `pexpect` and tmux 3.x. `PMUX_BIN` selects the binary under test (default `build/pmux`). See [tests/README.md](tests/README.md) for details.
+The tests are black-box tests. They need python3, [`pexpect`](https://pexpect.readthedocs.io/) and tmux 3.x. `PMUX_BIN` selects the binary under test (default `build/pmux`). Each test uses its own `HOME` and `XDG_RUNTIME_DIR`, so the suite never touches your real daemon. See [tests/README.md](tests/README.md) for details.
 
-The screenshots come from the real TUI and are regenerated with `python3 scripts/screenshots.py`. The script needs tmux, perl and a headless Chromium (`--chrome` or `$CHROME`).
+The screenshots come from the real TUI. To regenerate them, run `python3 scripts/screenshots.py`, which needs tmux, perl and a headless Chromium. It finds Chromium through `--chrome`, then `$CHROME`, then `PATH`, then the Playwright cache.
 
 ## Gallery
 
@@ -124,3 +159,7 @@ The screenshots come from the real TUI and are regenerated with `python3 scripts
 | Light theme | Typing filters the list |
 | ![New process dialog](docs/screenshots/new-dialog.png) | ![Kill confirmation](docs/screenshots/kill-confirm.png) |
 | `Ctrl+N`: new process | `Ctrl+X`: press again to kill |
+
+## License
+
+[MIT](LICENSE)
