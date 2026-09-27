@@ -33,7 +33,7 @@ The installer downloads the static binary of the latest release for your archite
 | `PMUX_INSTALL_DIR` | The directory to install to. |
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | PMUX_VERSION=0.1.0 PMUX_INSTALL_DIR="$HOME/bin" sh
+curl -fsSL https://raw.githubusercontent.com/knucklehead96/pmux/main/install.sh | PMUX_VERSION=0.1.1 PMUX_INSTALL_DIR="$HOME/bin" sh
 ```
 
 If you prefer to read the script before running it:
@@ -58,16 +58,16 @@ To install one by hand:
 
 ```sh
 mkdir -p ~/.local/bin
-curl -Lo ~/.local/bin/pmux https://github.com/knucklehead96/pmux/releases/download/v0.1.0/pmux-0.1.0-linux-x86_64-static && chmod +x ~/.local/bin/pmux
+curl -Lo ~/.local/bin/pmux https://github.com/knucklehead96/pmux/releases/download/v0.1.1/pmux-0.1.1-linux-x86_64-static && chmod +x ~/.local/bin/pmux
 ```
 
 To check the download against `SHA256SUMS` before installing:
 
 ```sh
-url=https://github.com/knucklehead96/pmux/releases/download/v0.1.0
-curl -LO "$url/pmux-0.1.0-linux-x86_64-static" -LO "$url/SHA256SUMS"
+url=https://github.com/knucklehead96/pmux/releases/download/v0.1.1
+curl -LO "$url/pmux-0.1.1-linux-x86_64-static" -LO "$url/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS
-install -m 755 pmux-0.1.0-linux-x86_64-static ~/.local/bin/pmux
+install -m 755 pmux-0.1.1-linux-x86_64-static ~/.local/bin/pmux
 ```
 
 ### Build from source
@@ -187,7 +187,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j
 tests/run.sh                  # the whole suite
 tests/run.sh -k test_tui      # a single module or test name
 PMUX_FAST=1 tests/run.sh      # skip the slow tests
-PMUX_BIN=dist/pmux-0.1.0-linux-x86_64-static PMUX_FAST=1 tests/run.sh
+PMUX_BIN=dist/pmux-0.1.1-linux-x86_64-static PMUX_FAST=1 tests/run.sh
 ```
 
 The tests are black-box tests. They need python3, [`pexpect`](https://pexpect.readthedocs.io/) and tmux 3.x. `PMUX_BIN` selects the binary under test (default `build/pmux`). Each test uses its own `HOME` and `XDG_RUNTIME_DIR`, so the suite never touches your real daemon. See [tests/README.md](tests/README.md) for details.

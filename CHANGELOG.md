@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-27
+
 ### Added
 
 - `install.sh` one-line installer:
@@ -81,5 +83,6 @@ First public release.
 - `scripts/release.sh` builds stripped release binaries: dynamically linked
   and fully static (x86-64 Linux), plus `SHA256SUMS`.
 
-[Unreleased]: https://github.com/knucklehead96/pmux/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/knucklehead96/pmux/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/knucklehead96/pmux/releases/tag/v0.1.1
 [0.1.0]: https://github.com/knucklehead96/pmux/releases/tag/v0.1.0
