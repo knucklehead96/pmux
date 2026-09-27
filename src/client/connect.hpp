@@ -13,14 +13,16 @@ namespace pmux {
 // Refuses a socket directory other users can access and a daemon owned by another uid.
 // The connection has passed HELLO: a daemon of another protocol version (or one older than
 // HELLO) is refused with a message telling the user to restart it.
-// `not_running` (if given) is set when the failure is only that no daemon is listening.
-UniqueFd connect_daemon(std::string* error = nullptr, bool* not_running = nullptr);
+// `not_running` (if given) is set when the failure is only that no daemon is listening,
+// `timed_out` when the daemon did not answer HELLO in time (it may still be fine).
+UniqueFd connect_daemon(std::string* error = nullptr, bool* not_running = nullptr,
+                        bool* timed_out = nullptr);
 
 // Connects, spawning the daemon (double fork + setsid) if it is not running.
 UniqueFd connect_or_spawn_daemon(std::string* error = nullptr);
 
 // What HELLO learned about the daemon.
-enum class Handshake { Match, Mismatch, Old, NoReply };
+enum class Handshake { Match, Mismatch, Old, NoReply, Timeout };
 struct DaemonInfo {
   std::uint32_t protocol = 0;
   std::string version;
@@ -32,6 +34,7 @@ struct DaemonInfo {
 UniqueFd connect_daemon_unchecked(std::string& error, bool& not_running, pid_t& peer_pid);
 
 // Sends HELLO and reads the reply. Old: the daemon answered with ERROR (it predates HELLO).
+// NoReply: the connection failed or closed; Timeout: no reply in time.
 Handshake handshake(int fd, DaemonInfo& info);
 
 // "the running daemon (pid N, ...) doesn't match this pmux (...). Restart it with: pmux --stop"

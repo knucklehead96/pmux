@@ -1,6 +1,7 @@
 #include "client/connect.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -48,7 +49,7 @@ void spawn_daemon() {
   _exit(run_daemon());
 }
 
-enum class Failure { None, NotRunning, Refused };
+enum class Failure { None, NotRunning, Refused, Timeout };
 
 // Connects to the daemon's socket. Refused: using it would be unsafe or cannot work (the
 // socket directory is not private, the path is too long, the daemon is another user's).
@@ -93,19 +94,20 @@ UniqueFd connect_checked(std::string& error, Failure& failure) {
   if (!fd) return fd;
   const Handshake result = handshake(fd.get(), info);
   if (result == Handshake::Match) return fd;
-  failure = Failure::Refused;
+  failure = result == Handshake::Timeout ? Failure::Timeout : Failure::Refused;
   error = mismatch_message(result, info);
   return {};
 }
 
 }  // namespace
 
-UniqueFd connect_daemon(std::string* error, bool* not_running) {
+UniqueFd connect_daemon(std::string* error, bool* not_running, bool* timed_out) {
   std::string message;
   Failure failure;
   UniqueFd fd = connect_checked(message, failure);
   if (!fd && error) *error = std::move(message);
   if (not_running) *not_running = failure == Failure::NotRunning;
+  if (timed_out) *timed_out = failure == Failure::Timeout;
   return fd;
 }
 
@@ -140,7 +142,10 @@ Handshake handshake(int fd, DaemonInfo& info) {
       make_frame(MsgType::Hello, PayloadWriter().u32(kProtocolVersion).str(PMUX_VERSION).take());
   if (!send_frame(fd, hello)) return Handshake::NoReply;
   const auto reply = recv_frame(fd, decoder, kHandshakeTimeoutMs);
-  if (!reply) return Handshake::NoReply;
+  if (!reply) {
+    pollfd pfd{fd, POLLIN, 0};  // readable now: EOF or an error, not a slow daemon
+    return !decoder.bad() && poll(&pfd, 1, 0) == 0 ? Handshake::Timeout : Handshake::NoReply;
+  }
   if (reply->type != MsgType::Hello) return Handshake::Old;
   PayloadReader r(reply->payload);
   const std::uint32_t protocol = r.u32();
@@ -154,7 +159,7 @@ Handshake handshake(int fd, DaemonInfo& info) {
 }
 
 std::string mismatch_message(Handshake result, const DaemonInfo& info) {
-  if (result == Handshake::NoReply) return "no reply from daemon";
+  if (result == Handshake::NoReply || result == Handshake::Timeout) return "no reply from daemon";
   std::string daemon = info.pid > 0 ? "pid " + std::to_string(info.pid) + ", " : "";
   std::string ours = PMUX_VERSION;
   if (result == Handshake::Old) {

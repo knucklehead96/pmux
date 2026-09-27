@@ -54,10 +54,12 @@ class VersionCase(PmuxTestCase):
         return ("pmux: the running daemon (pid %d, an older version) doesn't match this pmux (%s). "
                 "Restart it with: pmux --stop\n" % (pid, self.version)).encode()
 
-    def sleeper(self):
-        """A process in its own session, as the daemon's processes are."""
+    def sleeper(self, own_session=True):
+        """A process in its own session, as the daemon's processes are (or, without
+        own_session, only in its own process group)."""
         p = subprocess.Popen(["sleep", "600"], env=self.px.make_env(self.px.work),
-                             start_new_session=True)
+                             start_new_session=own_session,
+                             process_group=None if own_session else 0)
         self.px.popens.append(p)
         return p
 
@@ -168,6 +170,19 @@ class OldClient(PmuxTestCase):
         self.assertEqual(struct.unpack_from("<I", data, 5)[0], PROTOCOL)
         self.assertEqual(data[4 + n + 4], ERROR, data)
         self.assertIn(b"restart it with: pmux --stop", data[4 + n:])
+        # STOP is frozen: it still works after a HELLO of another protocol.
+        pid = self.px.daemon_pid()
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(TIMEOUT)
+        s.connect(self.px.sock)
+        self.addCleanup(s.close)
+        s.sendall(struct.pack("<IB", 9, HELLO) + struct.pack("<I", PROTOCOL + 1) + pstr(b""))
+        s.sendall(struct.pack("<IB", 2, STOP) + b"\0")
+        data = self.read_all(s)
+        n = struct.unpack_from("<I", data)[0]
+        self.assertEqual(data[4], HELLO)
+        self.assertEqual(data[4 + n:], struct.pack("<IB", 1, OK))
+        wait_until(lambda: not pid_alive(pid), msg="the daemon did not exit")
 
 
 class StopOldDaemon(VersionCase):
@@ -215,7 +230,33 @@ class StopOldDaemon(VersionCase):
                          b"daemon\n" % d.pid)
         self.assertIsNone(d.poll())
         p = self.px.run("--stop", "-f")
-        self.assertStopped(d, p, b"; any processes it ran were ended")
+        self.assertStopped(d, p, b"; its processes were sent SIGHUP, any that ignore it may still "
+                                 b"be running")
+
+    def test_stop_reads_older_list_layouts(self):
+        for layout in ("current", "idle-last-output", "idle"):
+            with self.subTest(layout=layout):
+                s = self.sleeper()
+                d = self.start_fake("--layout", layout, "--running", "busy:%d" % s.pid,
+                                    "--running", "two:%d" % s.pid)
+                p = self.px.run("--stop")
+                self.assertEqual((p.returncode, p.stderr),
+                                 (1, b"pmux: 2 process(es) still running: busy, two\n"
+                                     b"use pmux --stop --force to kill them and stop the daemon\n"))
+                d.terminate()
+                d.wait(TIMEOUT)
+                s.kill()
+                s.wait(TIMEOUT)
+
+    def test_force_spares_listed_pid_that_is_not_a_session_leader(self):
+        # A listed pid that no longer leads its own session is not the daemon's process:
+        # the SIGKILL sweep must leave it (and its process group) alone.
+        s = self.sleeper(own_session=False)
+        d = self.start_fake("--running", "gone:%d" % s.pid)
+        p = self.px.run("--stop", "--force", timeout=15)
+        self.assertStopped(d, p, b"; 1 of its 1 process(es) could not be verified and were left "
+                                 b"running")
+        self.assertIsNone(s.poll(), "a process that is not the daemon's was killed")
 
     def test_stop_refuses_pidfile_not_naming_the_peer(self):
         s = self.sleeper()

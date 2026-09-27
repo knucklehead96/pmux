@@ -508,6 +508,7 @@ struct Poller {
   bool paused = false;  // while attached: FTXUI is uninstalled, don't post
   bool wake = false;
   bool lost = false;  // the daemon cannot be reached any more
+  std::string lost_error;  // why, if it is more than a lost connection (a mismatched daemon)
   std::optional<std::vector<ProcInfo>> latest;
   std::vector<std::pair<std::uint32_t, std::string>> kill_errors;  // background kills that failed
   ftxui::ScreenInteractive* screen = nullptr;
@@ -531,21 +532,27 @@ struct Poller {
         wake = false;
         if (paused) continue;
       }
-      if (!fd) fd = connect_daemon();
+      // A daemon slow to answer HELLO is retried on the next poll, like a slow LIST.
+      std::string error;
+      bool not_running = false, timed_out = false;
+      if (!fd) fd = connect_daemon(&error, &not_running, &timed_out);
       auto list = fetch_list(fd.get());
       bool connected = true;
       if (!list) {
-        fd = connect_daemon();  // retry once on a fresh connection
+        fd = connect_daemon(&error, &not_running, &timed_out);  // retry once on a fresh connection
         if (fd) list = fetch_list(fd.get());
         if (!list) {
-          connected = static_cast<bool>(fd);
+          connected = fd || timed_out;
           fd.reset();
         }
       }
       std::lock_guard lock(m);
       if (stop) return;
       if (list) latest = std::move(list);
-      if (!connected) lost = true;
+      if (!connected) {
+        lost = true;
+        if (!not_running) lost_error = error;  // refused, e.g. a mismatched daemon
+      }
       if (!paused) screen->PostEvent(Event::Custom);
     }
   }
@@ -1013,14 +1020,16 @@ bool Tui::handle_event(const Event& event) {
   if (event == Event::Custom) {
     std::optional<std::vector<ProcInfo>> list;
     bool lost = false;
+    std::string lost_error;
     {
       std::lock_guard lock(poller_->m);
       list = std::exchange(poller_->latest, std::nullopt);
       lost = poller_->lost;
+      lost_error = poller_->lost_error;
     }
     if (lost) {
       exit_code_ = 1;
-      exit_error_ = "lost connection to daemon";
+      exit_error_ = lost_error.empty() ? "lost connection to daemon" : lost_error;
       quit();
       return true;
     }

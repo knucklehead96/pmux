@@ -43,9 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `pmux --stop` stops a daemon of an older version, including one that predates
-  `--stop` (it gets `SIGTERM` once pmux has checked that it is the user's process
-  on the socket; `--force` is still needed to end running processes).
 - The view of an exited process is painted at the terminal's size without
   resizing the process's stored screen: a terminal taller than that screen no
   longer shows lines twice.

@@ -280,9 +280,42 @@ bool owned_by_us(pid_t pid) {
   return stat(("/proc/" + std::to_string(pid)).c_str(), &st) == 0 && st.st_uid == getuid();
 }
 
+// A LIST_REPLY from any pmux daemon: the current layout or those of the builds before 0.1.0
+// (idle_ms after created_ms; up to c6a31af also last_output after created). Only name, pid and
+// exited are kept; nullopt if no layout fits the payload exactly.
+std::optional<std::vector<ProcInfo>> decode_any_proc_list(const std::vector<std::uint8_t>& payload) {
+  enum Layout { kCurrent, kIdleLastOutput, kIdleOnly };
+  for (const Layout layout : {kCurrent, kIdleLastOutput, kIdleOnly}) {
+    PayloadReader r(payload);
+    const std::uint32_t n = r.u32();
+    std::vector<ProcInfo> procs;
+    for (std::uint32_t i = 0; i < n && r.ok(); ++i) {
+      ProcInfo p;
+      p.id = r.u32();
+      p.name = r.str();
+      r.str();
+      r.strs();
+      p.pid = r.i32();
+      r.u64();                          // created_ms
+      if (layout != kCurrent) r.u64();  // idle_ms
+      p.exited = r.u8() != 0;
+      p.wait_status = r.i32();
+      if (layout != kIdleOnly) {
+        r.u64();                                // created
+        if (layout == kIdleLastOutput) r.u64();  // last_output
+        r.u8();                                 // bell
+        r.str();                                // fg_command
+      }
+      procs.push_back(std::move(p));
+    }
+    if (r.ok() && r.at_end()) return procs;
+  }
+  return std::nullopt;
+}
+
 // Stops a daemon too old for STOP with SIGTERM, once the pidfile names the process listening
 // on the socket and it is ours. Its processes get SIGHUP when their terminals close; like STOP,
-// that needs --force if any is running, and any still running 3 s later gets SIGKILL.
+// that needs --force if any is running, and those it listed still running 3 s later get SIGKILL.
 int stop_by_signal(int fd, pid_t peer_pid, bool force) {
   const pid_t pid = daemon_pid();
   if (pid <= 0 || pid != peer_pid || !owned_by_us(pid)) {
@@ -292,10 +325,9 @@ int stop_by_signal(int fd, pid_t peer_pid, bool force) {
                  static_cast<int>(pid), static_cast<int>(peer_pid));
     return 1;
   }
-  // LIST has not changed since before STOP existed.
   std::optional<std::vector<ProcInfo>> list;
   if (auto reply = request(fd, make_frame(MsgType::List)); reply && reply->type == MsgType::ListReply)
-    list = decode_proc_list(reply->payload);
+    list = decode_any_proc_list(reply->payload);
   std::vector<const ProcInfo*> running;
   if (list)
     for (const auto& p : *list)
@@ -319,18 +351,28 @@ int stop_by_signal(int fd, pid_t peer_pid, bool force) {
     return 1;
   }
   if (int rc = wait_daemon_exit(pid)) return rc;
-  // The processes it ran lead their own sessions; SIGKILL those that outlive their SIGHUP.
+  // The processes it ran lead their own sessions; SIGKILL those that outlive their SIGHUP, but
+  // leave alone any pid that is not (any more) such a process of ours.
   const auto deadline = std::chrono::steady_clock::now() + kKillGrace;
+  std::size_t left = 0;
   for (const ProcInfo* p : running) {
     const pid_t child = p->pid;
-    while (child > 0 && !process_gone(child) && std::chrono::steady_clock::now() < deadline)
+    while (child > 1 && !process_gone(child) && std::chrono::steady_clock::now() < deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    if (child > 0 && !process_gone(child) && getsid(child) == child && owned_by_us(child))
+    if (child <= 1 || process_gone(child)) continue;
+    if (getsid(child) == child && owned_by_us(child))
       kill(-child, SIGKILL);
+    else
+      ++left;
   }
   std::string ended;
-  if (!list) ended = "; any processes it ran were ended";
-  else if (!running.empty()) ended = "; its " + std::to_string(running.size()) + " process(es) were ended";
+  if (!list)
+    ended = "; its processes were sent SIGHUP, any that ignore it may still be running";
+  else if (left > 0)
+    ended = "; " + std::to_string(left) + " of its " + std::to_string(running.size()) +
+            " process(es) could not be verified and were left running";
+  else if (!running.empty())
+    ended = "; its " + std::to_string(running.size()) + " process(es) were ended";
   std::fprintf(stderr, "pmux: stopped the older daemon (pid %d)%s\n", static_cast<int>(pid), ended.c_str());
   return 0;
 }
@@ -351,7 +393,7 @@ int cmd_stop(const Options& o) {
   // Any daemon that answers HELLO understands STOP (frozen); older ones may too.
   DaemonInfo info;
   const Handshake hello = handshake(fd.get(), info);
-  if (hello == Handshake::NoReply) return report_failure(std::nullopt);
+  if (hello == Handshake::NoReply || hello == Handshake::Timeout) return report_failure(std::nullopt);
   auto reply = request(fd.get(), make_frame(MsgType::Stop, PayloadWriter().u8(o.force ? 1 : 0).take()),
                        kKillTimeoutMs);
   if (hello == Handshake::Old && reply && reply->type == MsgType::Error &&
