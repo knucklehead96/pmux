@@ -90,7 +90,7 @@ The daemon keeps running the version it was started from. After installing a new
 pmux --stop     # --force also ends the processes still running
 ```
 
-The client and the daemon check each other's protocol version when they connect. A pmux that doesn't match the running daemon exits with a message naming the daemon's pid instead of talking to it. `pmux --stop` still works on the older daemon: if that daemon predates `--stop`, pmux sends it `SIGTERM` after checking that it is your process and the one on the socket.
+The client and the daemon check each other's protocol version when they connect. A pmux that doesn't match the running daemon exits with a message naming the daemon's pid instead of talking to it. `pmux --stop` works across versions in both directions: a newer daemon accepts an older pmux's `--stop`, and if an older daemon predates `--stop`, pmux sends it `SIGTERM` after checking that it is your process and the one on the socket.
 
 ## Usage
 

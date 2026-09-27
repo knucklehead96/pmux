@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they connect. A pmux that doesn't match the running daemon (for example the
   daemon of an older version, still running after an upgrade) exits with a message
   naming the daemon's pid and asking to restart it with `pmux --stop`, instead of
-  misbehaving. An older client talking to a newer daemon gets a clear error.
+  misbehaving. An older client talking to a newer daemon gets a clear error;
+  its `pmux --stop` still works.
 
 ### Changed
 

@@ -19,9 +19,9 @@ inline constexpr std::uint32_t kProtocolVersion = 1;
 // Payloads (all integers little-endian; str = u32 length + bytes; strs = u32 count + str...):
 //   HELLO       client -> daemon: u32 protocol version, str pmux version
 //               daemon -> client: u32 protocol version, str pmux version, u32 daemon pid
-//               The first request on every connection; anything else first is answered with
-//               ERROR and the connection is closed (a client older than HELLO). After a HELLO
-//               with another protocol version the daemon accepts only HELLO and STOP.
+//               The first request on every connection; anything but STOP first is answered
+//               with ERROR and the connection is closed (a client older than HELLO). After a
+//               HELLO with another protocol version the daemon accepts only HELLO and STOP.
 //               Daemons older than HELLO answer it with ERROR ("unsupported request").
 //   LIST        -                                  -> LIST_REPLY
 //   LIST_REPLY  u32 count, ProcInfo...

@@ -217,10 +217,11 @@ void Server::on_client_event(std::uint32_t id, std::uint32_t events) {
 void Server::handle_frame(Client& c, const Frame& frame) {
   if (c.closing) return;
   if (frame.type == MsgType::Hello) return do_hello(c, frame);
-  if (c.hello == Client::Hello::None)
+  // STOP is frozen: a client older than HELLO can still stop the daemon.
+  if (c.hello == Client::Hello::None && frame.type != MsgType::Stop)
     return reject(c, "this pmux is older than the running daemon (pmux " PMUX_VERSION ", pid " +
                          std::to_string(getpid()) +
-                         "); use the matching pmux binary, or stop the daemon with it (pmux --stop)");
+                         "); use the matching pmux binary, or restart the daemon: pmux --stop");
   if (c.hello == Client::Hello::Mismatch && frame.type != MsgType::Stop)
     return reject(c, "this pmux doesn't match the running daemon (pmux " PMUX_VERSION
                      "); restart it with: pmux --stop");

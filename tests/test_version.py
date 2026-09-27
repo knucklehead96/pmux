@@ -5,7 +5,7 @@
   "restart it with: pmux --stop" message and exits 1 without sending any
   further request; -V stays offline.
 - a client older than HELLO gets an ERROR saying so and the connection is
-  closed.
+  closed, except for STOP (frozen), which it can still use.
 - pmux --stop on a daemon too old for STOP: SIGTERM after checking that the
   pidfile names the socket's peer; --force semantics as for STOP.
 
@@ -24,7 +24,7 @@ from helpers import (PMUX_BIN, PYTHON, TESTS_DIR, TIMEOUT, PmuxTestCase, pid_ali
                      wait_until)
 
 FAKE = os.path.join(TESTS_DIR, "fake_daemon.py")
-LIST, ERROR, STOP, HELLO = 1, 14, 17, 20
+LIST, ERROR, OK, STOP, HELLO = 1, 14, 15, 17, 20
 PROTOCOL = 1  # kProtocolVersion (src/common/protocol.hpp)
 
 
@@ -143,11 +143,20 @@ class OldClient(PmuxTestCase):
         s.sendall(struct.pack("<IB", 1, LIST))
         data = self.read_all(s)   # the daemon closes the connection after the ERROR
         msg = ("this pmux is older than the running daemon (pmux %s, pid %d); use the matching "
-               "pmux binary, or stop the daemon with it (pmux --stop)"
+               "pmux binary, or restart the daemon: pmux --stop"
                % (self.px.run("-V").stdout.decode().split()[1], self.px.daemon_pid())).encode()
         payload = bytes([ERROR]) + pstr(msg)
         self.assertEqual(data, struct.pack("<I", len(payload)) + payload)
         self.assertEqual(self.px.run("-l").returncode, 0, "the daemon must keep running")
+
+    def test_stop_before_hello_stops_the_daemon(self):
+        s = self.connect()
+        pid = self.px.daemon_pid()
+        s.sendall(struct.pack("<IB", 2, STOP) + b"\0")
+        self.assertEqual(self.read_all(s), struct.pack("<IB", 1, OK))
+        wait_until(lambda: not pid_alive(pid), msg="the daemon did not exit")
+        self.assertFalse(os.path.exists(self.px.sock))
+        self.assertEqual(self.px.list(), [], "a fresh daemon must start")
 
     def test_other_protocol_may_only_stop(self):
         s = self.connect()

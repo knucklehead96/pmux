@@ -123,7 +123,7 @@ Files:
   of another protocol version is refused by every mode (the TUI before it
   takes over the terminal) with a "Restart it with: pmux --stop" message, and
   `-V` never connects; a request before HELLO gets an ERROR and the
-  connection closes; `--stop` on a daemon too old for STOP (SIGTERM, only
+  connection closes, except STOP, which still stops the daemon; `--stop` on a daemon too old for STOP (SIGTERM, only
   when the pidfile names the socket's peer; `--force` semantics).
 - `fake_daemon.py` — the stand-in old / mismatched daemon for
   `test_version.py`; see its docstring.
