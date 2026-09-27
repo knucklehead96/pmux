@@ -215,6 +215,15 @@ void Server::on_client_event(std::uint32_t id, std::uint32_t events) {
 }
 
 void Server::handle_frame(Client& c, const Frame& frame) {
+  if (c.closing) return;
+  if (frame.type == MsgType::Hello) return do_hello(c, frame);
+  if (c.hello == Client::Hello::None)
+    return reject(c, "this pmux is older than the running daemon (pmux " PMUX_VERSION ", pid " +
+                         std::to_string(getpid()) +
+                         "); use the matching pmux binary, or stop the daemon with it (pmux --stop)");
+  if (c.hello == Client::Hello::Mismatch && frame.type != MsgType::Stop)
+    return reject(c, "this pmux doesn't match the running daemon (pmux " PMUX_VERSION
+                     "); restart it with: pmux --stop");
   switch (frame.type) {
     case MsgType::List: do_list(c); break;
     case MsgType::New: do_new(c, frame); break;
@@ -230,6 +239,24 @@ void Server::handle_frame(Client& c, const Frame& frame) {
     case MsgType::Scroll: do_scroll(c, frame); break;
     default: send(c, error_frame("unsupported request")); break;
   }
+}
+
+void Server::do_hello(Client& c, const Frame& frame) {
+  PayloadReader r(frame.payload);
+  const std::uint32_t protocol = r.u32();
+  r.str();  // the client's pmux version
+  if (!r.ok()) return reject(c, "malformed request");
+  c.hello = protocol == kProtocolVersion ? Client::Hello::Ok : Client::Hello::Mismatch;
+  PayloadWriter w;
+  w.u32(kProtocolVersion).str(PMUX_VERSION).u32(static_cast<std::uint32_t>(getpid()));
+  send(c, make_frame(MsgType::Hello, w.take()));
+}
+
+// Answers with ERROR and closes the connection once that is sent.
+void Server::reject(Client& c, const std::string& message) {
+  send(c, error_frame(message));
+  c.closing = true;
+  if (c.pending() == 0) c.dead = true;
 }
 
 void Server::do_list(Client& c) {
@@ -575,6 +602,7 @@ void Server::flush(Client& c) {
   if (c.pending() == 0) {
     c.out.clear();
     c.out_off = 0;
+    if (c.closing) c.dead = true;
   } else if (c.out_off > (1u << 16) && c.out_off * 2 > c.out.size()) {
     c.out.erase(0, c.out_off);
     c.out_off = 0;

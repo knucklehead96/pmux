@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -30,6 +31,7 @@ namespace {
 constexpr int kRequestTimeoutMs = 5000;
 constexpr int kKillTimeoutMs = 10000;
 constexpr auto kStopExitWait = std::chrono::seconds(5);
+constexpr auto kKillGrace = std::chrono::seconds(3);  // as the daemon's STOP --force
 
 constexpr const char* kUsage =
     "usage: pmux                               open the process list\n"
@@ -260,23 +262,8 @@ bool process_gone(pid_t pid) {
   return paren != std::string::npos && line.compare(paren, 3, ") Z") == 0;
 }
 
-int cmd_stop(const Options& o) {
-  std::string error;
-  bool not_running = false;
-  UniqueFd fd = connect_daemon(&error, &not_running);
-  if (!fd && not_running) {
-    std::fprintf(stderr, "pmux: no daemon running\n");
-    return 0;
-  }
-  if (!fd) {
-    std::fprintf(stderr, "pmux: %s\n", error.c_str());
-    return 1;
-  }
-  const pid_t pid = daemon_pid();
-  auto reply = request(fd.get(), make_frame(MsgType::Stop, PayloadWriter().u8(o.force ? 1 : 0).take()),
-                       kKillTimeoutMs);
-  if (!reply || reply->type != MsgType::Ok) return report_failure(reply);
-  // OK comes just before the daemon exits; wait until it has.
+// Waits (kStopExitWait) until the daemon has exited; 1 with a message if it did not.
+int wait_daemon_exit(pid_t pid) {
   const auto deadline = std::chrono::steady_clock::now() + kStopExitWait;
   while (pid && !process_gone(pid)) {
     if (std::chrono::steady_clock::now() >= deadline) {
@@ -286,6 +273,93 @@ int cmd_stop(const Options& o) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return 0;
+}
+
+bool owned_by_us(pid_t pid) {
+  struct stat st {};
+  return stat(("/proc/" + std::to_string(pid)).c_str(), &st) == 0 && st.st_uid == getuid();
+}
+
+// Stops a daemon too old for STOP with SIGTERM, once the pidfile names the process listening
+// on the socket and it is ours. Its processes get SIGHUP when their terminals close; like STOP,
+// that needs --force if any is running, and any still running 3 s later gets SIGKILL.
+int stop_by_signal(int fd, pid_t peer_pid, bool force) {
+  const pid_t pid = daemon_pid();
+  if (pid <= 0 || pid != peer_pid || !owned_by_us(pid)) {
+    std::fprintf(stderr,
+                 "pmux: the running daemon is too old for --stop, and its pidfile (pid %d) does not "
+                 "name the process on its socket (pid %d); not signalling anything\n",
+                 static_cast<int>(pid), static_cast<int>(peer_pid));
+    return 1;
+  }
+  // LIST has not changed since before STOP existed.
+  std::optional<std::vector<ProcInfo>> list;
+  if (auto reply = request(fd, make_frame(MsgType::List)); reply && reply->type == MsgType::ListReply)
+    list = decode_proc_list(reply->payload);
+  std::vector<const ProcInfo*> running;
+  if (list)
+    for (const auto& p : *list)
+      if (!p.exited) running.push_back(&p);
+  if (!force && !list) {
+    std::fprintf(stderr, "pmux: cannot tell whether the running daemon (pid %d, an older version) "
+                         "has running processes\nuse pmux --stop --force to kill them and stop the "
+                         "daemon\n", static_cast<int>(pid));
+    return 1;
+  }
+  if (!force && !running.empty()) {
+    std::string names;
+    for (const ProcInfo* p : running) names += (names.empty() ? "" : ", ") + p->name;
+    std::fprintf(stderr, "pmux: %zu process(es) still running: %s\nuse pmux --stop --force to kill "
+                         "them and stop the daemon\n", running.size(), names.c_str());
+    return 1;
+  }
+  if (kill(pid, SIGTERM) != 0) {
+    std::fprintf(stderr, "pmux: cannot signal the daemon (pid %d): %s\n", static_cast<int>(pid),
+                 std::strerror(errno));
+    return 1;
+  }
+  if (int rc = wait_daemon_exit(pid)) return rc;
+  // The processes it ran lead their own sessions; SIGKILL those that outlive their SIGHUP.
+  const auto deadline = std::chrono::steady_clock::now() + kKillGrace;
+  for (const ProcInfo* p : running) {
+    const pid_t child = p->pid;
+    while (child > 0 && !process_gone(child) && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (child > 0 && !process_gone(child) && getsid(child) == child && owned_by_us(child))
+      kill(-child, SIGKILL);
+  }
+  std::string ended;
+  if (!list) ended = "; any processes it ran were ended";
+  else if (!running.empty()) ended = "; its " + std::to_string(running.size()) + " process(es) were ended";
+  std::fprintf(stderr, "pmux: stopped the older daemon (pid %d)%s\n", static_cast<int>(pid), ended.c_str());
+  return 0;
+}
+
+int cmd_stop(const Options& o) {
+  std::string error;
+  bool not_running = false;
+  pid_t pid = 0;
+  UniqueFd fd = connect_daemon_unchecked(error, not_running, pid);
+  if (!fd && not_running) {
+    std::fprintf(stderr, "pmux: no daemon running\n");
+    return 0;
+  }
+  if (!fd) {
+    std::fprintf(stderr, "pmux: %s\n", error.c_str());
+    return 1;
+  }
+  // Any daemon that answers HELLO understands STOP (frozen); older ones may too.
+  DaemonInfo info;
+  const Handshake hello = handshake(fd.get(), info);
+  if (hello == Handshake::NoReply) return report_failure(std::nullopt);
+  auto reply = request(fd.get(), make_frame(MsgType::Stop, PayloadWriter().u8(o.force ? 1 : 0).take()),
+                       kKillTimeoutMs);
+  if (hello == Handshake::Old && reply && reply->type == MsgType::Error &&
+      PayloadReader(reply->payload).str() == "unsupported request")
+    return stop_by_signal(fd.get(), pid, o.force);
+  if (!reply || reply->type != MsgType::Ok) return report_failure(reply);
+  // OK comes just before the daemon exits; wait until it has.
+  return wait_daemon_exit(pid);
 }
 
 }  // namespace

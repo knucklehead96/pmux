@@ -82,6 +82,16 @@ cmake --install build --prefix ~/.local                # installs ~/.local/bin/p
 
 The default build type is `Release`. To build the release binaries yourself, run `scripts/release.sh`. It writes the stripped dynamic and static binaries and `SHA256SUMS` to `dist/`. The two CMake options it uses also work on their own: `-DPMUX_STATIC=ON` (needs `libvterm.a`, which `libvterm-dev` ships) and `-DPMUX_STRIP=ON`.
 
+### Upgrading
+
+The daemon keeps running the version it was started from. After installing a new pmux, restart it:
+
+```sh
+pmux --stop     # --force also ends the processes still running
+```
+
+The client and the daemon check each other's protocol version when they connect. A pmux that doesn't match the running daemon exits with a message naming the daemon's pid instead of talking to it. `pmux --stop` still works on the older daemon: if that daemon predates `--stop`, pmux sends it `SIGTERM` after checking that it is your process and the one on the socket.
+
 ## Usage
 
 | Command | |

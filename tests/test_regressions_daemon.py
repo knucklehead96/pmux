@@ -35,7 +35,8 @@ from test_restore import WINCH_MARK, RestoreCase, numbered, pane_state, split_sn
 from tui import TuiCase, dump
 
 # Message types (src/common/protocol.hpp).
-LIST, LIST_REPLY, ATTACH, INPUT, OK = 1, 2, 7, 9, 15
+LIST, LIST_REPLY, ATTACH, INPUT, OK, HELLO = 1, 2, 7, 9, 15, 20
+PROTOCOL = 1  # kProtocolVersion
 
 SIG_BITS = {name: 1 << (getattr(signal, name) - 1)
             for name in ("SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGUSR1", "SIGCHLD", "SIGPIPE")}
@@ -98,13 +99,15 @@ class Reader:
 
 
 class Conn:
-    """A daemon connection speaking the frame protocol directly."""
+    """A daemon connection speaking the frame protocol directly (after HELLO)."""
 
     def __init__(self, px, timeout=TIMEOUT):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(timeout)
         self.sock.connect(px.sock)
         self.buf = b""
+        typ, _ = self.request(HELLO, struct.pack("<I", PROTOCOL) + pstr(b"test"))
+        assert typ == HELLO, typ
 
     def close(self):
         self.sock.close()

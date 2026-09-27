@@ -40,7 +40,9 @@ class Server {
     std::optional<ClientState> state;  // the last STATE sent (frozen while scrolled)
     dev_t tty_rdev = 0;          // device of the tty the client attached from (0 = unknown)
     std::size_t snapshot_size = 0;  // the last snapshot sent; allowed on top of the queue limit
+    enum class Hello { None, Ok, Mismatch } hello = Hello::None;  // HELLO seen, and its outcome
     bool want_write = false;
+    bool closing = false;  // rejected: close once the queued ERROR is sent
     bool dead = false;
     std::size_t pending() const { return out.size() - out_off; }
   };
@@ -63,6 +65,8 @@ class Server {
   void on_master_event(std::uint32_t id, std::uint32_t events);
 
   void handle_frame(Client& c, const Frame& frame);
+  void do_hello(Client& c, const Frame& frame);
+  void reject(Client& c, const std::string& message);
   void do_list(Client& c);
   void do_new(Client& c, const Frame& frame);
   void do_rename(Client& c, const Frame& frame);

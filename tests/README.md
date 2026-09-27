@@ -118,6 +118,15 @@ Files:
   screen across resizes, RIS in the alternate screen, child signal state and
   umask, attach loops, modifyOtherKeys restore, process name, `daemon.log`,
   bounded queues and CSI buffer, foreground command.
+  Its raw-protocol `Conn` sends HELLO first.
+- `test_version.py` — the version handshake: a daemon older than HELLO or
+  of another protocol version is refused by every mode (the TUI before it
+  takes over the terminal) with a "Restart it with: pmux --stop" message, and
+  `-V` never connects; a request before HELLO gets an ERROR and the
+  connection closes; `--stop` on a daemon too old for STOP (SIGTERM, only
+  when the pidfile names the socket's peer; `--force` semantics).
+- `fake_daemon.py` — the stand-in old / mismatched daemon for
+  `test_version.py`; see its docstring.
 
 Notes: a detached tmux does not answer OSC 11, so pmux uses its assumed
 background (#1E1E1E dark / #FAFAF7 light) and the selection-bar color is

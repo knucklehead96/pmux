@@ -144,7 +144,8 @@ main() {
   elif [ -n "$old" ]; then
     say "upgraded $old -> $version in $dir/pmux"
     if have pgrep && pgrep -x pmux >/dev/null 2>&1; then
-      say "a pmux daemon is running the old version; restart it with: pmux --stop (or pmux --stop --force)"
+      say "a pmux daemon is running the old version, and the new pmux won't use it until it restarts:"
+      say "  pmux --stop    (pmux --stop --force also ends its processes)"
     fi
   else
     say "installed pmux $version to $dir/pmux"

@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and any other key leaves it and goes to the app. On the app's alternate
   screen the wheel sends `↑` / `↓`. Other mouse events are ignored then.
 - The read-only view of an exited process scrolls through its history the same way.
+- Version handshake: the client and the daemon exchange protocol versions when
+  they connect. A pmux that doesn't match the running daemon (for example the
+  daemon of an older version, still running after an upgrade) exits with a message
+  naming the daemon's pid and asking to restart it with `pmux --stop`, instead of
+  misbehaving. An older client talking to a newer daemon gets a clear error.
 
 ### Changed
 
@@ -37,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `pmux --stop` stops a daemon of an older version, including one that predates
+  `--stop` (it gets `SIGTERM` once pmux has checked that it is the user's process
+  on the socket; `--force` is still needed to end running processes).
 - The view of an exited process is painted at the terminal's size without
   resizing the process's stored screen: a terminal taller than that screen no
   longer shows lines twice.

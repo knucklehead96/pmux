@@ -10,7 +10,19 @@
 
 namespace pmux {
 
+// Client and daemon talk only when their protocol versions are equal (see HELLO). Bump it with
+// every change a peer built from another version could misread: a new message type, an added,
+// removed or reordered field, or changed behavior of an existing message. HELLO, OK, ERROR and
+// STOP (type values and payloads) are frozen, so that any pmux can identify and stop any daemon.
+inline constexpr std::uint32_t kProtocolVersion = 1;
+
 // Payloads (all integers little-endian; str = u32 length + bytes; strs = u32 count + str...):
+//   HELLO       client -> daemon: u32 protocol version, str pmux version
+//               daemon -> client: u32 protocol version, str pmux version, u32 daemon pid
+//               The first request on every connection; anything else first is answered with
+//               ERROR and the connection is closed (a client older than HELLO). After a HELLO
+//               with another protocol version the daemon accepts only HELLO and STOP.
+//               Daemons older than HELLO answer it with ERROR ("unsupported request").
 //   LIST        -                                  -> LIST_REPLY
 //   LIST_REPLY  u32 count, ProcInfo...
 //   NEW         str name, str dir, strs argv, strs env, u16 rows, u16 cols [, u32 umask]
@@ -74,6 +86,7 @@ enum class MsgType : std::uint8_t {
   Stop,
   State,
   Scroll,
+  Hello,
 };
 
 // STATE flags.
